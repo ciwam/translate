@@ -2,15 +2,19 @@
 #import "core_bridge.h"
 #import "TTSettingsStore.h"
 
-@interface TranslateViewController () <NSWindowDelegate>
+@interface TranslateViewController () <NSWindowDelegate, NSTextViewDelegate>
 @property (nonatomic, strong) NSPopUpButton *targetPopup;
 @property (nonatomic, strong) NSTextView *sourceView;
 @property (nonatomic, strong) NSTextView *resultView;
-@property (nonatomic, strong) NSButton *translateButton;
 @property (nonatomic, strong) NSTextField *statusLabel;
 @property (nonatomic, strong) NSButton *settingsButton;
 @property (nonatomic, strong) NSButton *duplicateButton;
 @property (nonatomic, strong) NSButton *quitButton;
+
+// Debounce timer for auto-translation after typing pauses.
+@property (nonatomic, strong) dispatch_source_t translateTimer;
+// Bumped on every auto-translate so stale deltas/completions are dropped.
+@property (nonatomic, assign) NSUInteger translationGeneration;
 
 // Modal settings panel, created on demand and owned by this controller.
 @property (nonatomic, strong) NSPanel *settingsPanel;
@@ -54,12 +58,6 @@
                                                 height:100
                                               editable:YES
                                              growable:NO]];
-
-    self.translateButton = [NSButton buttonWithTitle:@"翻译"
-                                              target:self
-                                              action:@selector(translateTapped:)];
-    self.translateButton.bezelStyle = NSBezelStylePush;
-    [stack addArrangedSubview:self.translateButton];
 
     self.statusLabel = [NSTextField labelWithString:@""];
     self.statusLabel.textColor = [NSColor secondaryLabelColor];
@@ -121,6 +119,7 @@
 
     textView.editable = editable;
     textView.richText = NO;
+    textView.delegate = self;
     textView.font = [NSFont systemFontOfSize:13];
     textView.textContainerInset = NSMakeSize(4, 4);
     textView.verticallyResizable = YES;
@@ -282,28 +281,59 @@
     [parent makeKeyAndOrderFront:nil];
 }
 
-- (void)translateTapped:(id)sender {
+static const NSTimeInterval kAutoTranslateDelay = 0.8;
+
+// Translating starts automatically once the user pauses typing in the source
+// text view; a debounce prevents a request per keystroke.
+- (void)textDidChange:(NSNotification *)notification {
+    if (notification.object != self.sourceView) return;
+    if (self.translateTimer) {
+        dispatch_source_cancel(self.translateTimer);
+        self.translateTimer = nil;
+    }
+    dispatch_source_t timer = dispatch_source_create(
+        DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
+    dispatch_source_set_timer(timer,
+                             dispatch_time(DISPATCH_TIME_NOW,
+                                           (int64_t)(kAutoTranslateDelay * NSEC_PER_SEC)),
+                             DISPATCH_TIME_FOREVER, 0);
+    dispatch_source_set_event_handler(timer, ^{
+        self.translateTimer = nil;
+        [self startTranslation];
+    });
+    self.translateTimer = timer;
+    dispatch_resume(timer);
+}
+
+- (void)startTranslation {
+    NSString *raw = self.sourceView.string ?: @"";
+    NSCharacterSet *ws = [NSCharacterSet whitespaceAndNewlineCharacterSet];
+    if ([raw stringByTrimmingCharactersInSet:ws].length == 0) {
+        self.resultView.string = @"";
+        self.statusLabel.stringValue = @"";
+        return;
+    }
+
     NSInteger pIndex = [TTSettingsStore providerIndex];
     if (pIndex == NSNotFound || pIndex < 0) pIndex = 0;
     pIndex = MIN(pIndex, [TTCore providerCount] - 1);
     NSInteger tIndex = MIN(self.targetPopup.indexOfSelectedItem, [TTCore targetCount] - 1);
     NSString *key = [TTSettingsStore apiKey] ?: @"";
-    NSString *text = self.sourceView.string ?: @"";
 
     [self save];
 
+    NSUInteger gen = ++self.translationGeneration;
     self.statusLabel.stringValue = @"翻译中…";
-    self.translateButton.enabled = NO;
     self.resultView.string = @""; // clear the previous result
 
     __weak typeof(self) weakSelf = self;
     [TTCore translateProvider:(int)pIndex
                        target:(int)tIndex
                        apiKey:key
-                         text:text
+                         text:raw
                         delta:^(NSString *partial) { // main queue
         typeof(self) strongSelf = weakSelf;
-        if (!strongSelf) return;
+        if (!strongSelf || gen != strongSelf.translationGeneration) return;
         // Overwrite with the running full result. `partial` is always a valid
         // UTF-8 prefix (the core holds back incomplete trailing code points),
         // so this can never show U+FFFD or truncate.
@@ -312,8 +342,7 @@
     }
                     completion:^(BOOL ok, NSString *result, NSString *error) {
         typeof(self) strongSelf = weakSelf;
-        if (!strongSelf) return;
-        strongSelf.translateButton.enabled = YES;
+        if (!strongSelf || gen != strongSelf.translationGeneration) return;
         if (ok) {
             strongSelf.resultView.string = result ?: @"";
             strongSelf.statusLabel.stringValue = @"完成";
