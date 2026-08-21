@@ -7,8 +7,9 @@ extern "C" {
 
 /* Provider selection (mirrors the configured AI models). */
 typedef enum {
-    TRANSLATE_PROVIDER_SILICONFLOW = 0, /* Qwen2.5-7B-Instruct */
-    TRANSLATE_PROVIDER_ZHIPU = 1        /* GLM-4-Flash */
+    TRANSLATE_PROVIDER_SILICONFLOW = 0, /* DeepSeek-V3.2 */
+    TRANSLATE_PROVIDER_ZHIPU = 1,       /* GLM-4-Flash */
+    TRANSLATE_PROVIDER_SILICONFLOW_QWEN = 2 /* Qwen2.5-7B-Instruct */
 } translate_provider_t;
 
 /* Target language selection. */

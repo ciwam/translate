@@ -8,8 +8,9 @@
 namespace {
 
 const char *kProviderNames[] = {
-    "硅基流动 · Qwen2.5-7B-Instruct",
+    "硅基流动 · DeepSeek-V3.2",
     "智谱 · GLM-4-Flash",
+    "硅基流动 · Qwen2.5-7B-Instruct",
 };
 
 const char *kTargetNames[] = {
@@ -22,13 +23,19 @@ const char *kTargetNames[] = {
     "西班牙语",
 };
 
-constexpr int kProviderCount = 2;
+constexpr int kProviderCount = 3;
 constexpr int kTargetCount = 7;
 constexpr int kDefaultTarget = 1; // Simplified Chinese
 
 inline translate::Provider to_cpp(translate_provider_t p) {
-    return (p == TRANSLATE_PROVIDER_ZHIPU) ? translate::Provider::Zhipu
-                                           : translate::Provider::SiliconFlow;
+    switch (p) {
+        case TRANSLATE_PROVIDER_ZHIPU:
+            return translate::Provider::Zhipu;
+        case TRANSLATE_PROVIDER_SILICONFLOW_QWEN:
+            return translate::Provider::SiliconFlow_Qwen;
+        default:
+            return translate::Provider::SiliconFlow;
+    }
 }
 
 inline translate::Target to_cpp(translate_target_t t) {

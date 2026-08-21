@@ -14,11 +14,16 @@ namespace {
 struct ProviderInfo {
     const char *endpoint;
     const char *model;
+    // structure_fragile marks models that corrupt numbers, paths, and brackets
+    // when asked to translate them. Such providers route rebuild-style or
+    // verbatim-passthrough sources; faithful models get the raw text.
+    bool structure_fragile;
 };
 
 constexpr ProviderInfo kProviders[] = {
-    {"https://api.siliconflow.cn/v1/chat/completions", "Qwen/Qwen2.5-7B-Instruct"},
-    {"https://open.bigmodel.cn/api/paas/v4/chat/completions", "glm-4-flash"},
+    {"https://api.siliconflow.cn/v1/chat/completions", "deepseek-ai/DeepSeek-V3.2", false},
+    {"https://open.bigmodel.cn/api/paas/v4/chat/completions", "glm-4-flash", true},
+    {"https://api.siliconflow.cn/v1/chat/completions", "Qwen/Qwen2.5-7B-Instruct", true},
 };
 
 struct TargetInfo {
@@ -174,19 +179,21 @@ void Translator::translate(Provider provider,
             break;
     }
 
-    // Classify the source. When it is dominated by technical tokens — build
-    // logs, configs, code — pass it through verbatim: this model cannot
-    // reproduce numbers, brackets, or paths, so any attempt to translate them
-    // corrupts the structure. Otherwise stream the whole text through the
-    // model, trusting the prompt below to preserve non-language tokens and
-    // relying on the prose fraction guard to keep fragile input away.
+    // Classify the source. Models that corrupt structure (structure_fragile)
+    // must not receive text dominated by technical tokens — build logs, configs,
+    // code — so it passes through verbatim: such a model cannot reproduce
+    // numbers, brackets, or paths, and any attempt to translate them corrupts
+    // the document. Faithful models translate the whole text, trusting the
+    // prompt below to preserve non-language tokens.
     bool has_tech = false;
     double prose_fraction = 0.0;
-    analyze_technical(src, has_tech, prose_fraction);
     constexpr double kMinProseFraction = 0.5;
-    if (has_tech && prose_fraction < kMinProseFraction) {
-        cb({true, normalize_if_chinese(src, target), ""});
-        return;
+    if (kProviders[pIdx].structure_fragile) {
+        analyze_technical(src, has_tech, prose_fraction);
+        if (has_tech && prose_fraction < kMinProseFraction) {
+            cb({true, normalize_if_chinese(src, target), ""});
+            return;
+        }
     }
 
     std::string system_prompt =

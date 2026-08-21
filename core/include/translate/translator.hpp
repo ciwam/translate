@@ -5,7 +5,9 @@
 
 namespace translate {
 
-enum class Provider { SiliconFlow, Zhipu };
+// Enum order mirrors translate_provider_t; kProviders[] in translator.cpp is
+// indexed by these values.
+enum class Provider { SiliconFlow, Zhipu, SiliconFlow_Qwen };
 enum class Target { English, Chinese, Japanese, Korean, French, German, Spanish };
 
 struct Result {
