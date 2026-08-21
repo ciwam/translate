@@ -18,7 +18,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             defer: false
         )
         window.contentViewController = vc
-        window.title = "翻译"
+        window.title = "Translate"
         window.center()
         window.makeKeyAndOrderFront(nil)
         mainWindow = window
@@ -27,9 +27,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if let button = statusItem.button {
             if #available(macOS 11.0, *) {
                 button.image = NSImage(systemSymbolName: "character.book.closed",
-                                       accessibilityDescription: "翻译")
+                                       accessibilityDescription: "Translate")
             } else {
-                button.title = "译"
+                button.title = "T"
             }
             button.action = #selector(toggleWindow(_:))
             button.target = self
@@ -52,7 +52,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func setupMenus() {
         let main = NSMenu()
 
-        let appName = "翻译"
+        let appName = "Translate"
         let appMenu = NSMenu()
         appMenu.addItem(withTitle: "关于 \(appName)",
                         action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)),
@@ -98,7 +98,7 @@ final class TranslateViewController: NSViewController {
     private let targetPopup = NSPopUpButton()
     private let sourceView = NSTextView()
     private let resultView = NSTextView()
-    private let translateButton = NSButton(title: "翻译", target: nil, action: nil)
+    private let translateButton = NSButton(title: "Translate", target: nil, action: nil)
     private let statusLabel = NSTextField(labelWithString: "")
     private let copyButton = NSButton(title: "复制结果", target: nil, action: nil)
     private let quitButton = NSButton(title: "退出", target: nil, action: nil)
@@ -248,7 +248,7 @@ final class TranslateViewController: NSViewController {
         let text = sourceView.string
         save()
 
-        statusLabel.stringValue = "翻译中…"
+        statusLabel.stringValue = "Translating…"
         translateButton.isEnabled = false
         translator.translate(text: text, provider: provider, apiKey: key, target: target) { [weak self] result in
             DispatchQueue.main.async {

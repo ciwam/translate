@@ -106,7 +106,7 @@ final class Translator {
         }
         let src = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !src.isEmpty else {
-            completion(.failure(makeError("请输入要翻译的文本")))
+            completion(.failure(makeError("Please enter text to translate")))
             return
         }
         guard let url = URL(string: provider.endpoint) else {
