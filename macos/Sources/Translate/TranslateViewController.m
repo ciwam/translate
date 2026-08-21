@@ -2,16 +2,20 @@
 #import "core_bridge.h"
 #import "TTSettingsStore.h"
 
-@interface TranslateViewController ()
-@property (nonatomic, strong) NSPopUpButton *providerPopup;
-@property (nonatomic, strong) NSSecureTextField *apiKeyField;
+@interface TranslateViewController () <NSWindowDelegate>
 @property (nonatomic, strong) NSPopUpButton *targetPopup;
 @property (nonatomic, strong) NSTextView *sourceView;
 @property (nonatomic, strong) NSTextView *resultView;
 @property (nonatomic, strong) NSButton *translateButton;
 @property (nonatomic, strong) NSTextField *statusLabel;
+@property (nonatomic, strong) NSButton *settingsButton;
 @property (nonatomic, strong) NSButton *duplicateButton;
 @property (nonatomic, strong) NSButton *quitButton;
+
+// Modal settings panel, created on demand and owned by this controller.
+@property (nonatomic, strong) NSPanel *settingsPanel;
+@property (nonatomic, strong) NSPopUpButton *panelProviderPopup;
+@property (nonatomic, strong) NSSecureTextField *panelApiKeyField;
 @end
 
 @implementation TranslateViewController
@@ -39,17 +43,6 @@
 
     self.sourceView = [[NSTextView alloc] init];
     self.resultView = [[NSTextView alloc] init];
-
-    self.providerPopup = [[NSPopUpButton alloc] init];
-    int pc = [TTCore providerCount];
-    for (int i = 0; i < pc; i++) {
-        [self.providerPopup addItemWithTitle:[TTCore providerDisplayName:i]];
-    }
-    [stack addArrangedSubview:[self rowWithTitle:@"模型" control:self.providerPopup]];
-
-    self.apiKeyField = [[NSSecureTextField alloc] init];
-    self.apiKeyField.placeholderString = @"在此填写 API Key";
-    [stack addArrangedSubview:[self rowWithTitle:@"API Key" control:self.apiKeyField]];
 
     self.targetPopup = [[NSPopUpButton alloc] init];
     int tc = [TTCore targetCount];
@@ -82,14 +75,19 @@
     NSStackView *bottom = [[NSStackView alloc] init];
     bottom.orientation = NSUserInterfaceLayoutOrientationHorizontal;
     bottom.spacing = 8;
+    self.settingsButton = [NSButton buttonWithTitle:@"设置"
+                                             target:self
+                                             action:@selector(presentSettingsPanel:)];
+    self.settingsButton.bezelStyle = NSBezelStylePush;
     self.duplicateButton = [NSButton buttonWithTitle:@"复制结果"
-                                         target:self
-                                         action:@selector(copyTapped:)];
+                                              target:self
+                                              action:@selector(copyTapped:)];
     self.duplicateButton.bezelStyle = NSBezelStylePush;
     self.quitButton = [NSButton buttonWithTitle:@"退出"
                                          target:self
                                          action:@selector(quitTapped:)];
     self.quitButton.bezelStyle = NSBezelStylePush;
+    [bottom addArrangedSubview:self.settingsButton];
     [bottom addArrangedSubview:self.duplicateButton];
     [bottom addArrangedSubview:self.quitButton];
     [stack addArrangedSubview:bottom];
@@ -145,29 +143,151 @@
 }
 
 - (void)restore {
-    NSInteger provider = [TTSettingsStore providerIndex];
-    if (provider != NSNotFound) {
-        [self.providerPopup selectItemAtIndex:provider];
-    }
     NSInteger target = [TTSettingsStore targetIndex];
     if (target != NSNotFound) {
         [self.targetPopup selectItemAtIndex:target];
     } else {
         [self.targetPopup selectItemAtIndex:[TTCore defaultTargetIndex]];
     }
-    self.apiKeyField.stringValue = [TTSettingsStore apiKey] ?: @"";
 }
 
 - (void)save {
-    [TTSettingsStore saveProviderIndex:self.providerPopup.indexOfSelectedItem
+    NSInteger provider = [TTSettingsStore providerIndex];
+    if (provider == NSNotFound) provider = 0;
+    NSString *key = [TTSettingsStore apiKey] ?: @"";
+    [TTSettingsStore saveProviderIndex:provider
                            targetIndex:self.targetPopup.indexOfSelectedItem
-                                apiKey:self.apiKeyField.stringValue];
+                                apiKey:key];
+}
+
+#pragma mark - Settings modal panel
+
+- (void)presentSettingsIfNeeded {
+    if ([TTSettingsStore apiKey].length == 0) {
+        [self presentSettingsPanel:nil];
+    }
+}
+
+- (void)presentSettingsPanel:(id)sender {
+    NSWindow *parent = self.view.window;
+    if (!parent) return;
+    if (self.settingsPanel) {
+        [self.settingsPanel makeKeyAndOrderFront:nil];
+        return;
+    }
+
+    NSPanel *panel = [[NSPanel alloc]
+        initWithContentRect:NSMakeRect(0, 0, 400, 150)
+                  styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
+                    backing:NSBackingStoreBuffered
+                      defer:NO];
+    panel.title = @"设置";
+    panel.releasedWhenClosed = NO;
+    panel.delegate = self;
+    panel.hidesOnDeactivate = NO;
+    self.settingsPanel = panel;
+
+    NSStackView *stack = [[NSStackView alloc] init];
+    stack.orientation = NSUserInterfaceLayoutOrientationVertical;
+    stack.spacing = 10;
+    stack.edgeInsets = NSEdgeInsetsMake(12, 14, 12, 14);
+    stack.translatesAutoresizingMaskIntoConstraints = NO;
+    [panel.contentView addSubview:stack];
+    [NSLayoutConstraint activateConstraints:@[
+        [stack.topAnchor constraintEqualToAnchor:panel.contentView.topAnchor],
+        [stack.leadingAnchor constraintEqualToAnchor:panel.contentView.leadingAnchor],
+        [stack.trailingAnchor constraintEqualToAnchor:panel.contentView.trailingAnchor],
+        [stack.bottomAnchor constraintEqualToAnchor:panel.contentView.bottomAnchor]
+    ]];
+
+    self.panelProviderPopup = [[NSPopUpButton alloc] init];
+    int pc = [TTCore providerCount];
+    for (int i = 0; i < pc; i++) {
+        [self.panelProviderPopup addItemWithTitle:[TTCore providerDisplayName:i]];
+    }
+    NSInteger provider = [TTSettingsStore providerIndex];
+    if (provider == NSNotFound || provider < 0) provider = 0;
+    [self.panelProviderPopup selectItemAtIndex:MIN(provider, pc - 1)];
+    [stack addArrangedSubview:[self rowWithTitle:@"模型" control:self.panelProviderPopup]];
+
+    self.panelApiKeyField = [[NSSecureTextField alloc] init];
+    self.panelApiKeyField.placeholderString = @"在此填写 API Key";
+    self.panelApiKeyField.stringValue = [TTSettingsStore apiKey] ?: @"";
+    [stack addArrangedSubview:[self rowWithTitle:@"API Key" control:self.panelApiKeyField]];
+
+    NSStackView *buttons = [[NSStackView alloc] init];
+    buttons.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    buttons.spacing = 8;
+    NSView *spacer = [[NSView alloc] initWithFrame:NSZeroRect];
+    [spacer setContentHuggingPriority:NSLayoutPriorityDefaultLow
+                       forOrientation:NSLayoutConstraintOrientationHorizontal];
+    NSButton *confirm = [NSButton buttonWithTitle:@"确定"
+                                           target:self
+                                           action:@selector(confirmSettingsTapped:)];
+    confirm.bezelStyle = NSBezelStylePush;
+    confirm.keyEquivalent = @"\r"; // Return
+    NSButton *cancel = [NSButton buttonWithTitle:@"取消"
+                                          target:self
+                                          action:@selector(cancelSettingsTapped:)];
+    cancel.bezelStyle = NSBezelStylePush;
+    cancel.keyEquivalent = @"\e"; // Escape
+    [buttons addArrangedSubview:spacer];
+    [buttons addArrangedSubview:confirm];
+    [buttons addArrangedSubview:cancel];
+    [stack addArrangedSubview:buttons];
+
+    // Center the panel over the main window, then run modally.
+    NSRect parentFrame = parent.frame;
+    NSRect panelFrame = panel.frame;
+    CGFloat x = parentFrame.origin.x + (parentFrame.size.width - panelFrame.size.width) / 2;
+    CGFloat y = parentFrame.origin.y + (parentFrame.size.height - panelFrame.size.height) / 2;
+    [panel setFrameOrigin:NSMakePoint(round(x), round(y))];
+
+    [parent addChildWindow:panel ordered:NSWindowAbove];
+    [NSApp runModalForWindow:panel];
+}
+
+- (void)confirmSettingsTapped:(id)sender {
+    NSInteger target = [TTSettingsStore targetIndex];
+    if (target == NSNotFound) target = [TTCore defaultTargetIndex];
+    [TTSettingsStore saveProviderIndex:self.panelProviderPopup.indexOfSelectedItem
+                           targetIndex:target
+                                apiKey:self.panelApiKeyField.stringValue ?: @""];
+    [self closeSettingsPanel];
+}
+
+- (void)cancelSettingsTapped:(id)sender {
+    [self closeSettingsPanel];
+}
+
+// Red close button on the panel also ends the modal session.
+- (void)windowWillClose:(NSNotification *)notification {
+    if (notification.object == self.settingsPanel) {
+        [self closeSettingsPanel];
+    }
+}
+
+- (void)closeSettingsPanel {
+    NSPanel *panel = self.settingsPanel;
+    if (!panel) return;
+    if (NSApp.modalWindow == panel) {
+        [NSApp stopModal];
+    }
+    NSWindow *parent = self.view.window;
+    [parent removeChildWindow:panel];
+    [panel orderOut:nil];
+    self.settingsPanel = nil;
+    self.panelProviderPopup = nil;
+    self.panelApiKeyField = nil;
+    [parent makeKeyAndOrderFront:nil];
 }
 
 - (void)translateTapped:(id)sender {
-    NSInteger pIndex = MIN(self.providerPopup.indexOfSelectedItem, [TTCore providerCount] - 1);
+    NSInteger pIndex = [TTSettingsStore providerIndex];
+    if (pIndex == NSNotFound || pIndex < 0) pIndex = 0;
+    pIndex = MIN(pIndex, [TTCore providerCount] - 1);
     NSInteger tIndex = MIN(self.targetPopup.indexOfSelectedItem, [TTCore targetCount] - 1);
-    NSString *key = self.apiKeyField.stringValue;
+    NSString *key = [TTSettingsStore apiKey] ?: @"";
     NSString *text = self.sourceView.string ?: @"";
 
     [self save];

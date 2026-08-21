@@ -41,6 +41,9 @@
         self.statusItem.button.target = self;
         self.statusItem.button.action = @selector(toggleWindow:);
     }
+
+    // With no API key configured yet, ask the user to fill it in right away.
+    [self.vc presentSettingsIfNeeded];
 }
 
 - (void)toggleWindow:(id)sender {
