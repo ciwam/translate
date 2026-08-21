@@ -1,20 +1,19 @@
 #!/bin/bash
-# 编译并打包为 macOS 桌面 App（窗口式，进 Dock，纯 AppKit，零第三方依赖）
+# 编译并打包为 macOS 桌面 App（Objective-C UI + C++ 内核，CMake 统管）
 # 用法:
-#   ./build.sh          仅构建 App
+#   ./build.sh          显示本帮助（不构建）
 #   ./build.sh clean    清理构建缓存与已构建的 App（删除 .build）
 #   ./build.sh build    先 clean，再构建 App
 #   ./build.sh run      先 clean，再构建 App，随后运行
-#   ./build.sh help     显示帮助
+#   ./build.sh help     显示本帮助
 
 set -e
 
 cd "$(dirname "$0")"
-
+ROOT="$(cd .. && pwd)"
 APP_NAME="Translate"
-BUNDLE_ID="com.ciwang.translate"
-BUILD_ROOT=".build"
-APP_BUNDLE="$BUILD_ROOT/$APP_NAME.app"
+BUILD_DIR=".build"
+BUNDLE="$BUILD_DIR/macos/$APP_NAME.app"
 
 print_help() {
   cat <<'EOF'
@@ -24,60 +23,25 @@ print_help() {
   ./build.sh build     先 clean，再构建 App
   ./build.sh run       先 clean，再构建 App，随后运行
   ./build.sh help      显示本帮助
-
-环境变量:
-  无
 EOF
 }
 
 clean() {
-  echo "==> clean: 删除 $BUILD_ROOT"
-  rm -rf "$BUILD_ROOT"
+  echo "==> clean: 删除 $BUILD_DIR"
+  rm -rf "$BUILD_DIR"
 }
 
-ICON_SRC="AppIcon.icns"
-
 build() {
-  mkdir -p "$APP_BUNDLE/Contents/MacOS" "$APP_BUNDLE/Contents/Resources"
-  echo "==> 编译 (swiftc -O) ..."
-  swiftc -O \
-    -framework Cocoa \
-    Sources/Translate/main.swift \
-    Sources/Translate/Translator.swift \
-    -o "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
-
-  if [ -f "$ICON_SRC" ]; then
-    cp "$ICON_SRC" "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
-    echo "==> 已复制图标: $ICON_SRC"
-    ICON_KEY='    <key>CFBundleIconFile</key><string>AppIcon</string>'
-  else
-    ICON_KEY=""
-  fi
-
-  cat > "$APP_BUNDLE/Contents/Info.plist" <<EOF
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>CFBundleName</key><string>$APP_NAME</string>
-    <key>CFBundleDisplayName</key><string>Translate</string>
-    <key>CFBundleIdentifier</key><string>$BUNDLE_ID</string>
-    <key>CFBundleVersion</key><string>1</string>
-    <key>CFBundleShortVersionString</key><string>1.0</string>
-    <key>CFBundleExecutable</key><string>$APP_NAME</string>
-    <key>CFBundlePackageType</key><string>APPL</string>
-    <key>LSMinimumSystemVersion</key><string>13.0</string>
-    <key>NSHighResolutionCapable</key><true/>
-$ICON_KEY
-</dict>
-</plist>
-EOF
-  echo "==> 完成: $APP_BUNDLE"
+  clean
+  echo "==> configure (cmake -S $ROOT -B $BUILD_DIR)"
+  cmake -S "$ROOT" -B "$BUILD_DIR" -DCMAKE_BUILD_TYPE=Release
+  echo "==> build ($APP_NAME)"
+  cmake --build "$BUILD_DIR" --target "$APP_NAME"
 }
 
 run_app() {
-  echo "==> run: open '$APP_BUNDLE'"
-  open "$APP_BUNDLE"
+  echo "==> run: open '$BUNDLE'"
+  open "$BUNDLE"
 }
 
 case "${1:-}" in
@@ -88,16 +52,11 @@ case "${1:-}" in
     clean
     ;;
   build)
-    clean
     build
     ;;
   run)
-    clean
     build
     run_app
-    ;;
-  help|-h|--help)
-    print_help
     ;;
   *)
     echo "未知参数: $1"
