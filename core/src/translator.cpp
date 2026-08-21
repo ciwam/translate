@@ -80,12 +80,12 @@ void Translator::translate(Provider provider,
                            DeltaCallback delta_cb) {
     std::string key = trim(api_key);
     if (key.empty()) {
-        cb({false, "", "Please fill in the API Key"});
+        cb({false, "", "请填写 API Key"});
         return;
     }
     std::string src = trim(text);
     if (src.empty()) {
-        cb({false, "", "Please enter text to translate"});
+        cb({false, "", "请输入要翻译的文本"});
         return;
     }
 
@@ -206,15 +206,15 @@ void Translator::translate(Provider provider,
     }
 
     if (!stream_err.empty()) {
-        cb({false, "", "API error: " + stream_err});
+        cb({false, "", "API 错误：" + stream_err});
         return;
     }
     std::string content = trim(result);
     if (content.empty()) {
         std::string msg = http_status >= 400
-            ? "API error: HTTP " + std::to_string(http_status)
-            : "Unexpected response: no content received (HTTP " +
-              std::to_string(http_status) + ")";
+            ? "API 错误：HTTP " + std::to_string(http_status)
+            : "响应异常：未收到内容（HTTP " +
+              std::to_string(http_status) + "）";
         cb({false, "", msg});
         return;
     }

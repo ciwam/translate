@@ -8,18 +8,18 @@
 namespace {
 
 const char *kProviderNames[] = {
-    "SiliconFlow · Qwen2.5-7B-Instruct",
-    "Zhipu · GLM-4-Flash",
+    "硅基流动 · Qwen2.5-7B-Instruct",
+    "智谱 · GLM-4-Flash",
 };
 
 const char *kTargetNames[] = {
-    "English",
-    "Simplified Chinese",
-    "Japanese",
-    "Korean",
-    "French",
-    "German",
-    "Spanish",
+    "英语",
+    "简体中文",
+    "日语",
+    "韩语",
+    "法语",
+    "德语",
+    "西班牙语",
 };
 
 constexpr int kProviderCount = 2;

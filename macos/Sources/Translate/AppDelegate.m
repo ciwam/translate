@@ -60,11 +60,11 @@
     NSString *appName = @"Translate";
 
     NSMenu *appMenu = [[NSMenu alloc] init];
-    [appMenu addItemWithTitle:[NSString stringWithFormat:@"About %@", appName]
+    [appMenu addItemWithTitle:[NSString stringWithFormat:@"关于 %@", appName]
                         action:@selector(orderFrontStandardAboutPanel:)
                  keyEquivalent:@""];
     [appMenu addItem:[NSMenuItem separatorItem]];
-    [appMenu addItemWithTitle:[NSString stringWithFormat:@"Quit %@", appName]
+    [appMenu addItemWithTitle:[NSString stringWithFormat:@"退出 %@", appName]
                         action:@selector(terminate:)
                  keyEquivalent:@"q"];
     NSMenuItem *appItem = [[NSMenuItem alloc] initWithTitle:appName
@@ -73,16 +73,16 @@
     appItem.submenu = appMenu;
     [main addItem:appItem];
 
-    NSMenu *edit = [[NSMenu alloc] initWithTitle:@"Edit"];
-    [edit addItemWithTitle:@"Undo" action:@selector(undo:) keyEquivalent:@"z"];
-    [edit addItemWithTitle:@"Redo" action:@selector(redo:) keyEquivalent:@"Z"];
+    NSMenu *edit = [[NSMenu alloc] initWithTitle:@"编辑"];
+    [edit addItemWithTitle:@"撤销" action:@selector(undo:) keyEquivalent:@"z"];
+    [edit addItemWithTitle:@"重做" action:@selector(redo:) keyEquivalent:@"Z"];
     [edit addItem:[NSMenuItem separatorItem]];
-    [edit addItemWithTitle:@"Cut" action:@selector(cut:) keyEquivalent:@"x"];
-    [edit addItemWithTitle:@"Copy" action:@selector(copy:) keyEquivalent:@"c"];
-    [edit addItemWithTitle:@"Paste" action:@selector(paste:) keyEquivalent:@"v"];
+    [edit addItemWithTitle:@"剪切" action:@selector(cut:) keyEquivalent:@"x"];
+    [edit addItemWithTitle:@"拷贝" action:@selector(copy:) keyEquivalent:@"c"];
+    [edit addItemWithTitle:@"粘贴" action:@selector(paste:) keyEquivalent:@"v"];
     [edit addItem:[NSMenuItem separatorItem]];
-    [edit addItemWithTitle:@"Select All" action:@selector(selectAll:) keyEquivalent:@"a"];
-    NSMenuItem *editItem = [[NSMenuItem alloc] initWithTitle:@"Edit"
+    [edit addItemWithTitle:@"全选" action:@selector(selectAll:) keyEquivalent:@"a"];
+    NSMenuItem *editItem = [[NSMenuItem alloc] initWithTitle:@"编辑"
                                                       action:nil
                                                keyEquivalent:@""];
     editItem.submenu = edit;

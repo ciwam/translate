@@ -48,25 +48,25 @@ static NSString *const kTargetKey = @"targetIndex";
     for (int i = 0; i < pc; i++) {
         [self.providerPopup addItemWithTitle:[TTCore providerDisplayName:i]];
     }
-    [stack addArrangedSubview:[self rowWithTitle:@"Model" control:self.providerPopup]];
+    [stack addArrangedSubview:[self rowWithTitle:@"模型" control:self.providerPopup]];
 
     self.apiKeyField = [[NSSecureTextField alloc] init];
     self.apiKeyField.placeholderString = @"在此填写 API Key";
-    [stack addArrangedSubview:[self rowWithTitle:@"Key" control:self.apiKeyField]];
+    [stack addArrangedSubview:[self rowWithTitle:@"API Key" control:self.apiKeyField]];
 
     self.targetPopup = [[NSPopUpButton alloc] init];
     int tc = [TTCore targetCount];
     for (int i = 0; i < tc; i++) {
         [self.targetPopup addItemWithTitle:[TTCore targetDisplayName:i]];
     }
-    [stack addArrangedSubview:[self rowWithTitle:@"Target" control:self.targetPopup]];
+    [stack addArrangedSubview:[self rowWithTitle:@"目标语言" control:self.targetPopup]];
 
     [stack addArrangedSubview:[self scrollForTextView:self.sourceView
                                                 height:100
                                               editable:YES
                                              growable:NO]];
 
-    self.translateButton = [NSButton buttonWithTitle:@"Translate"
+    self.translateButton = [NSButton buttonWithTitle:@"翻译"
                                               target:self
                                               action:@selector(translateTapped:)];
     self.translateButton.bezelStyle = NSBezelStylePush;
@@ -85,11 +85,11 @@ static NSString *const kTargetKey = @"targetIndex";
     NSStackView *bottom = [[NSStackView alloc] init];
     bottom.orientation = NSUserInterfaceLayoutOrientationHorizontal;
     bottom.spacing = 8;
-    self.duplicateButton = [NSButton buttonWithTitle:@"Copy Result"
+    self.duplicateButton = [NSButton buttonWithTitle:@"复制结果"
                                          target:self
                                          action:@selector(copyTapped:)];
     self.duplicateButton.bezelStyle = NSBezelStylePush;
-    self.quitButton = [NSButton buttonWithTitle:@"Quit"
+    self.quitButton = [NSButton buttonWithTitle:@"退出"
                                          target:self
                                          action:@selector(quitTapped:)];
     self.quitButton.bezelStyle = NSBezelStylePush;
@@ -173,7 +173,7 @@ static NSString *const kTargetKey = @"targetIndex";
 
     [self save];
 
-    self.statusLabel.stringValue = @"Translating…";
+    self.statusLabel.stringValue = @"翻译中…";
     self.translateButton.enabled = NO;
     self.resultView.string = @""; // clear the previous result
 
@@ -197,9 +197,9 @@ static NSString *const kTargetKey = @"targetIndex";
         strongSelf.translateButton.enabled = YES;
         if (ok) {
             strongSelf.resultView.string = result ?: @"";
-            strongSelf.statusLabel.stringValue = @"Done";
+            strongSelf.statusLabel.stringValue = @"完成";
         } else {
-            strongSelf.statusLabel.stringValue = error ?: @"Error";
+            strongSelf.statusLabel.stringValue = error ?: @"错误";
         }
     }];
 }
@@ -208,7 +208,7 @@ static NSString *const kTargetKey = @"targetIndex";
     NSPasteboard *pb = [NSPasteboard generalPasteboard];
     [pb clearContents];
     [pb setString:self.resultView.string forType:NSPasteboardTypeString];
-    self.statusLabel.stringValue = @"Copied";
+    self.statusLabel.stringValue = @"已复制";
 }
 
 - (void)quitTapped:(id)sender {

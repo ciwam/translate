@@ -98,6 +98,19 @@ extern "C" size_t sse_write_cb(void *contents, size_t size, size_t nmemb, void *
     return total;
 }
 
+// Chinese message for a curl error code; falls back to curl's English text.
+std::string curl_error_message(CURLcode res) {
+    switch (res) {
+        case CURLE_OPERATION_TIMEDOUT:    return "请求超时";
+        case CURLE_COULDNT_CONNECT:       return "无法连接到服务器";
+        case CURLE_COULDNT_RESOLVE_HOST:  return "无法解析服务器地址";
+        case CURLE_RECV_ERROR:            return "接收数据失败";
+        case CURLE_PARTIAL_FILE:          return "响应数据不完整";
+        case CURLE_SSL_CONNECT_ERROR:     return "SSL 连接失败";
+        default: return curl_easy_strerror(res);
+    }
+}
+
 } // namespace
 
 bool http_post_json(const std::string &url,
@@ -107,7 +120,7 @@ bool http_post_json(const std::string &url,
                     std::string &error_out) {
     CURL *curl = curl_easy_init();
     if (!curl) {
-        error_out = "Failed to initialize HTTP client";
+        error_out = "无法初始化 HTTP 客户端";
         return false;
     }
 
@@ -132,7 +145,7 @@ bool http_post_json(const std::string &url,
     curl_easy_cleanup(curl);
 
     if (res != CURLE_OK) {
-        error_out = std::string("Network error: ") + curl_easy_strerror(res);
+        error_out = std::string("网络错误：") + curl_error_message(res);
         return false;
     }
 
@@ -148,12 +161,12 @@ bool http_post_sse(const std::string &url,
                    std::string &error_out,
                    long *http_status_out) {
     if (!on_data) {
-        error_out = "No SSE data callback provided";
+        error_out = "未提供流式数据回调";
         return false;
     }
     CURL *curl = curl_easy_init();
     if (!curl) {
-        error_out = "Failed to initialize HTTP client";
+        error_out = "无法初始化 HTTP 客户端";
         return false;
     }
 
@@ -191,7 +204,7 @@ bool http_post_sse(const std::string &url,
     curl_easy_cleanup(curl);
 
     if (res != CURLE_OK) {
-        error_out = std::string("Network error: ") + curl_easy_strerror(res);
+        error_out = std::string("网络错误：") + curl_error_message(res);
         return false;
     }
     if (http_status_out) *http_status_out = http_status;
