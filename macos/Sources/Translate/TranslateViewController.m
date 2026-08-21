@@ -49,7 +49,6 @@
     for (int i = 0; i < tc; i++) {
         [self.targetPopup addItemWithTitle:[TTCore targetDisplayName:i]];
     }
-    [stack addArrangedSubview:[self rowWithTitle:@"目标语言" control:self.targetPopup]];
 
     [stack addArrangedSubview:[self scrollForTextView:self.sourceView
                                                 height:100
@@ -87,6 +86,7 @@
                                          target:self
                                          action:@selector(quitTapped:)];
     self.quitButton.bezelStyle = NSBezelStylePush;
+    [bottom addArrangedSubview:[self rowWithTitle:@"目标语言" control:self.targetPopup]];
     [bottom addArrangedSubview:self.settingsButton];
     [bottom addArrangedSubview:self.duplicateButton];
     [bottom addArrangedSubview:self.quitButton];
