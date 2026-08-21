@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <string>
+#include <vector>
 
 namespace translate {
 namespace {
@@ -70,6 +71,63 @@ constexpr long kTimeoutBaseSeconds = 60;
 constexpr long kTimeoutPerKbSeconds = 20;
 constexpr long kTimeoutMaxSeconds = 900;
 
+// A token is "technical" when it is predominantly ASCII and contains a
+// structural character (digit or one of _ / % \ . [] : = < >). Build-log
+// prefixes, file paths, identifiers, percentages, and flags cannot be
+// reproduced by this small model, so translate() does not let it touch text
+// that is mostly technical tokens: such sources pass through verbatim.
+// A '.' counts only when it is internal (file extension, version number) —
+// a sentence-final period is ordinary punctuation.
+bool is_protected_token(const std::string &tok) {
+    size_t ascii = 0;
+    bool technical = false;
+    const size_t n = tok.size();
+    for (size_t i = 0; i < n; ++i) {
+        unsigned char c = static_cast<unsigned char>(tok[i]);
+        if (c < 0x80) ++ascii;
+        if ((c >= '0' && c <= '9') || c == '_' || c == '/' || c == '%' ||
+            c == '\\' || c == '[' || c == ']' || c == ':' || c == '=' ||
+            c == '<' || c == '>') {
+            technical = true;
+        } else if (c == '.' && i + 1 < n) {
+            technical = true;
+        }
+    }
+    return technical && ascii * 2 > tok.size();
+}
+
+// Classify the whole source: have_tech is set when any token is protected, and
+// prose_fraction is the share of non-whitespace bytes in non-protected tokens.
+// Used to route between streaming translation (mostly prose) and verbatim
+// passthrough (mostly technical, e.g. build logs and configs).
+void analyze_technical(const std::string &src, bool &have_tech,
+                       double &prose_fraction) {
+    have_tech = false;
+    size_t total = 0, prose = 0;
+    size_t i = 0;
+    const size_t n = src.size();
+    while (i < n) {
+        while (i < n && (src[i] == ' ' || src[i] == '\t' || src[i] == '\r' ||
+                         src[i] == '\n')) {
+            ++i;
+        }
+        const size_t start = i;
+        while (i < n && src[i] != ' ' && src[i] != '\t' && src[i] != '\r' &&
+               src[i] != '\n') {
+            ++i;
+        }
+        if (i == start) break;
+        std::string tok = src.substr(start, i - start);
+        total += tok.size();
+        if (is_protected_token(tok)) {
+            have_tech = true;
+        } else {
+            prose += tok.size();
+        }
+    }
+    prose_fraction = total == 0 ? 0.0 : static_cast<double>(prose) / total;
+}
+
 } // namespace
 
 void Translator::translate(Provider provider,
@@ -116,18 +174,36 @@ void Translator::translate(Provider provider,
             break;
     }
 
+    // Classify the source. When it is dominated by technical tokens — build
+    // logs, configs, code — pass it through verbatim: this model cannot
+    // reproduce numbers, brackets, or paths, so any attempt to translate them
+    // corrupts the structure. Otherwise stream the whole text through the
+    // model, trusting the prompt below to preserve non-language tokens and
+    // relying on the prose fraction guard to keep fragile input away.
+    bool has_tech = false;
+    double prose_fraction = 0.0;
+    analyze_technical(src, has_tech, prose_fraction);
+    constexpr double kMinProseFraction = 0.5;
+    if (has_tech && prose_fraction < kMinProseFraction) {
+        cb({true, normalize_if_chinese(src, target), ""});
+        return;
+    }
+
     std::string system_prompt =
-        "You are a professional translator. "
-        "Translate the user's text exactly into the requested target language. "
-        "Always provide a translation; never echo or return the original text "
-        "unchanged. "
-        "Output only the translated text, with no explanations, notes, "
-        "examples, or quotation marks. " +
+        "You are a professional translator. Translate the user's text "
+        "exactly into the requested target language. Always provide a "
+        "translation; never echo or return the original text unchanged. "
+        "Preserve verbatim every non-language token exactly as written: "
+        "numbers, percent signs, brackets, file paths, code identifiers, "
+        "URLs, and command names. Never reword, reorder, drop, or recompute "
+        "them. Keep the exact line structure and translate the text "
+        "completely without truncating or omitting any line. Output only the "
+        "translated text, with no explanations, notes, examples, or "
+        "quotation marks. " +
         constraints;
     std::string user_prompt =
         "Translate the following text into " + target_name +
         ". Provide only the translation:\n\n" + src;
-
     nlohmann::json payload = {
         {"model", model},
         {"messages",
@@ -209,8 +285,7 @@ void Translator::translate(Provider provider,
         cb({false, "", "API 错误：" + stream_err});
         return;
     }
-    std::string content = trim(result);
-    if (content.empty()) {
+    if (trim(result).empty()) {
         std::string msg = http_status >= 400
             ? "API 错误：HTTP " + std::to_string(http_status)
             : "响应异常：未收到内容（HTTP " +
@@ -218,7 +293,7 @@ void Translator::translate(Provider provider,
         cb({false, "", msg});
         return;
     }
-    cb({true, normalize_if_chinese(content, target), ""});
+    cb({true, normalize_if_chinese(trim(result), target), ""});
 }
 
 } // namespace translate
