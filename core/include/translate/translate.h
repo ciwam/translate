@@ -43,6 +43,33 @@ void translate_run(translate_provider_t provider,
                    translate_callback_t callback,
                    void *userdata);
 
+/* Streaming events delivered to translate_stream_callback_t. */
+typedef enum {
+    TRANSLATE_EVENT_DELTA = 0, /* `text`: translation accumulated so far, a valid
+                                  UTF-8 prefix of the final result (never split
+                                  mid-character; heap-allocated, free with
+                                  translate_free). Not terminal. */
+    TRANSLATE_EVENT_DONE  = 1, /* `text`: final complete translation, trimmed and
+                                  normalized (free with translate_free). Terminal. */
+    TRANSLATE_EVENT_ERROR = 2  /* `error`: message (free with translate_free). Terminal. */
+} translate_event_t;
+
+typedef void (*translate_stream_callback_t)(translate_event_t event,
+                                            const char *text,
+                                            const char *error,
+                                            void *userdata);
+
+/* Streaming translate. DELTA events allow progressive rendering; each DELTA
+   `text` is the ENTIRE result so far, so a front-end overwrites its display.
+   Exactly one DONE or ERROR is delivered (never both, never extra). Synchronous
+   (blocks until the stream ends); callback invoked on the calling thread. */
+void translate_run_stream(translate_provider_t provider,
+                          translate_target_t target,
+                          const char *api_key,
+                          const char *text,
+                          translate_stream_callback_t callback,
+                          void *userdata);
+
 /* Free a string previously returned through the callback. */
 void translate_free(char *ptr);
 

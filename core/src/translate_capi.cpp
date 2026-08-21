@@ -54,6 +54,35 @@ void translate_run(translate_provider_t provider,
                      });
 }
 
+void translate_run_stream(translate_provider_t provider,
+                          translate_target_t target,
+                          const char *api_key,
+                          const char *text,
+                          translate_stream_callback_t callback,
+                          void *userdata) {
+    translate::Translator engine;
+    std::string key = api_key ? api_key : "";
+    std::string src = text ? text : "";
+    bool done = false; // translate() always invokes cb exactly once
+    engine.translate(
+        to_cpp(provider), to_cpp(target), key, src,
+        [callback, userdata, &done](const translate::Result &r) {
+            if (done) return;
+            done = true;
+            if (r.ok) {
+                char *dup = strdup(r.text.c_str());
+                callback(TRANSLATE_EVENT_DONE, dup, nullptr, userdata);
+            } else {
+                char *dup = strdup(r.error.c_str());
+                callback(TRANSLATE_EVENT_ERROR, nullptr, dup, userdata);
+            }
+        },
+        [callback, userdata](const std::string &partial) {
+            char *dup = strdup(partial.c_str());
+            callback(TRANSLATE_EVENT_DELTA, dup, nullptr, userdata);
+        });
+}
+
 void translate_free(char *ptr) {
     free(ptr); // NOLINT
 }

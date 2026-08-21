@@ -175,13 +175,23 @@ static NSString *const kTargetKey = @"targetIndex";
 
     self.statusLabel.stringValue = @"Translating…";
     self.translateButton.enabled = NO;
+    self.resultView.string = @""; // clear the previous result
 
     __weak typeof(self) weakSelf = self;
     [TTCore translateProvider:(int)pIndex
                        target:(int)tIndex
                        apiKey:key
                          text:text
-                   completion:^(BOOL ok, NSString *result, NSString *error) {
+                        delta:^(NSString *partial) { // main queue
+        typeof(self) strongSelf = weakSelf;
+        if (!strongSelf) return;
+        // Overwrite with the running full result. `partial` is always a valid
+        // UTF-8 prefix (the core holds back incomplete trailing code points),
+        // so this can never show U+FFFD or truncate.
+        strongSelf.resultView.string = partial ?: @"";
+        [strongSelf.resultView scrollToEndOfDocument:nil];
+    }
+                    completion:^(BOOL ok, NSString *result, NSString *error) {
         typeof(self) strongSelf = weakSelf;
         if (!strongSelf) return;
         strongSelf.translateButton.enabled = YES;
