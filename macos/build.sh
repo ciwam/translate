@@ -35,6 +35,8 @@ clean() {
   rm -rf "$BUILD_ROOT"
 }
 
+ICON_SRC="AppIcon.icns"
+
 build() {
   mkdir -p "$APP_BUNDLE/Contents/MacOS" "$APP_BUNDLE/Contents/Resources"
   echo "==> 编译 (swiftc -O) ..."
@@ -43,6 +45,14 @@ build() {
     Sources/Translate/main.swift \
     Sources/Translate/Translator.swift \
     -o "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
+
+  if [ -f "$ICON_SRC" ]; then
+    cp "$ICON_SRC" "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
+    echo "==> 已复制图标: $ICON_SRC"
+    ICON_KEY='    <key>CFBundleIconFile</key><string>AppIcon</string>'
+  else
+    ICON_KEY=""
+  fi
 
   cat > "$APP_BUNDLE/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -58,6 +68,7 @@ build() {
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>LSMinimumSystemVersion</key><string>13.0</string>
     <key>NSHighResolutionCapable</key><true/>
+$ICON_KEY
 </dict>
 </plist>
 EOF
