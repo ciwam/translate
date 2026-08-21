@@ -7,11 +7,14 @@ set(BUNDLE_ID "com.ciwang.translate")
 
 find_library(COCOA_FRAMEWORK Cocoa REQUIRED)
 find_library(FOUNDATION_FRAMEWORK Foundation REQUIRED)
+find_library(SECURITY_FRAMEWORK Security REQUIRED)
 
 set(SOURCES
     Sources/Translate/main.m
     Sources/Translate/AppDelegate.m
     Sources/Translate/TranslateViewController.m
+    Sources/Translate/TTSettingsStore.h
+    Sources/Translate/TTSettingsStore.m
     Sources/Translate/core_bridge.mm
 )
 
@@ -31,6 +34,7 @@ target_link_libraries(${APP_NAME} PRIVATE
     translate_core
     ${COCOA_FRAMEWORK}
     ${FOUNDATION_FRAMEWORK}
+    ${SECURITY_FRAMEWORK}
 )
 
 target_include_directories(${APP_NAME} PRIVATE

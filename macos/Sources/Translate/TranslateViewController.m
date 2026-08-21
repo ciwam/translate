@@ -1,9 +1,6 @@
 #import "TranslateViewController.h"
 #import "core_bridge.h"
-
-static NSString *const kProviderKey = @"providerIndex";
-static NSString *const kApiKeyKey = @"apiKey";
-static NSString *const kTargetKey = @"targetIndex";
+#import "TTSettingsStore.h"
 
 @interface TranslateViewController ()
 @property (nonatomic, strong) NSPopUpButton *providerPopup;
@@ -148,21 +145,23 @@ static NSString *const kTargetKey = @"targetIndex";
 }
 
 - (void)restore {
-    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
-    [self.providerPopup selectItemAtIndex:[d integerForKey:kProviderKey]];
-    if ([d objectForKey:kTargetKey] != nil) {
-        [self.targetPopup selectItemAtIndex:[d integerForKey:kTargetKey]];
+    NSInteger provider = [TTSettingsStore providerIndex];
+    if (provider != NSNotFound) {
+        [self.providerPopup selectItemAtIndex:provider];
+    }
+    NSInteger target = [TTSettingsStore targetIndex];
+    if (target != NSNotFound) {
+        [self.targetPopup selectItemAtIndex:target];
     } else {
         [self.targetPopup selectItemAtIndex:[TTCore defaultTargetIndex]];
     }
-    self.apiKeyField.stringValue = [d stringForKey:kApiKeyKey] ?: @"";
+    self.apiKeyField.stringValue = [TTSettingsStore apiKey] ?: @"";
 }
 
 - (void)save {
-    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
-    [d setInteger:self.providerPopup.indexOfSelectedItem forKey:kProviderKey];
-    [d setInteger:self.targetPopup.indexOfSelectedItem forKey:kTargetKey];
-    [d setObject:self.apiKeyField.stringValue forKey:kApiKeyKey];
+    [TTSettingsStore saveProviderIndex:self.providerPopup.indexOfSelectedItem
+                           targetIndex:self.targetPopup.indexOfSelectedItem
+                                apiKey:self.apiKeyField.stringValue];
 }
 
 - (void)translateTapped:(id)sender {
