@@ -15,6 +15,8 @@
 @property (nonatomic, strong) dispatch_source_t translateTimer;
 // Bumped on every auto-translate so stale deltas/completions are dropped.
 @property (nonatomic, assign) NSUInteger translationGeneration;
+// Throttle for forcing full layout of the streaming result view.
+@property (nonatomic, assign) NSTimeInterval lastResultLayoutTime;
 
 // Modal settings panel, created on demand and owned by this controller.
 @property (nonatomic, strong) NSPanel *settingsPanel;
@@ -121,6 +123,11 @@
     NSScrollView *scroll = [[NSScrollView alloc] init];
     scroll.hasVerticalScroller = YES;
     scroll.hasHorizontalScroller = NO;
+    // With short text the document is shorter than the clip (scroll range 0),
+    // so any trackpad gesture is elastic overscroll — a visible "jump". Disable
+    // rubber-banding: no range, no bounce.
+    scroll.verticalScrollElasticity = NSScrollElasticityNone;
+    scroll.horizontalScrollElasticity = NSScrollElasticityNone;
     scroll.borderType = NSBezelBorder;
     scroll.translatesAutoresizingMaskIntoConstraints = NO;
 
@@ -331,6 +338,21 @@ static const NSTimeInterval kAutoTranslateDelay = 0.8;
     dispatch_resume(timer);
 }
 
+// The streaming result view's frame grows lazily: appended text is laid out
+// only when it becomes visible. Without forcing layout, the document height
+// lags behind the real text, and the first scroll to the far end triggers a
+// layout catch-up that grows the document mid-scroll — a one-time jump. Force
+// full layout periodically while streaming (throttled) and once at completion
+// so the document height tracks the content and the scroll range stays stable.
+- (void)keepResultLayoutCurrent {
+    NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+    if (now - self.lastResultLayoutTime > 0.1) {
+        self.lastResultLayoutTime = now;
+        [self.resultView.layoutManager
+            ensureLayoutForTextContainer:self.resultView.textContainer];
+    }
+}
+
 - (void)startTranslation {
     NSString *raw = self.sourceView.string ?: @"";
     NSCharacterSet *ws = [NSCharacterSet whitespaceAndNewlineCharacterSet];
@@ -350,8 +372,14 @@ static const NSTimeInterval kAutoTranslateDelay = 0.8;
     [self save];
 
     NSUInteger gen = ++self.translationGeneration;
+    self.lastResultLayoutTime = 0;
     self.statusLabel.stringValue = @"翻译中…";
     self.resultView.string = @""; // clear the previous result
+    // Guarantee the source document's height is final before the user scrolls
+    // (paste normally sizes it eagerly; this covers any lazy layout state so
+    // the first scroll pass has a stable range).
+    [self.sourceView.layoutManager
+        ensureLayoutForTextContainer:self.sourceView.textContainer];
 
     __weak typeof(self) weakSelf = self;
     [TTCore translateProvider:(int)pIndex
@@ -365,14 +393,55 @@ static const NSTimeInterval kAutoTranslateDelay = 0.8;
         // Overwrite with the running full result. `partial` is always a valid
         // UTF-8 prefix (the core holds back incomplete trailing code points),
         // so this can never show U+FFFD or truncate.
-        strongSelf.resultView.string = partial ?: @"";
-        [strongSelf.resultView scrollToEndOfDocument:nil];
+        // Apply the running result incrementally. Each delta is a strict prefix
+        // extension of the previous one, so appending only the new characters
+        // to the text storage typesets just that range — instead of replacing
+        // the whole string every delta, which re-typesets the entire document
+        // each frame, saturates the main thread, and makes manual scrolling in
+        // either box visibly jump.
+        NSTextStorage *ts = strongSelf.resultView.textStorage;
+        NSString *current = ts.string;
+        NSString *partialText = partial ?: @"";
+        if (partialText.length != current.length ||
+            ![partialText hasPrefix:current]) {
+            // Not a strict prefix extension (a retry reset the stream, or the
+            // content diverged): replace wholesale.
+            [ts replaceCharactersInRange:NSMakeRange(0, ts.length)
+                              withString:partialText];
+        } else if (partialText.length > current.length) {
+            [ts beginEditing];
+            [ts replaceCharactersInRange:NSMakeRange(current.length,
+                                                     partialText.length - current.length)
+                              withString:[partialText substringFromIndex:current.length]];
+            [ts endEditing];
+        }
+        [strongSelf keepResultLayoutCurrent];
+        // Follow the stream only while the user is already at the bottom; if
+        // they scrolled up to read earlier lines, don't yank the view back
+        // down on every delta.
+        NSScrollView *rv = strongSelf.resultView.enclosingScrollView;
+        if (rv) {
+            NSClipView *clip = rv.contentView;
+            CGFloat maxY = clip.documentRect.size.height - clip.bounds.size.height;
+            if (maxY <= 0 || clip.bounds.origin.y >= maxY - 40) {
+                [strongSelf.resultView scrollToEndOfDocument:nil];
+            }
+        }
     }
                     completion:^(BOOL ok, NSString *result, NSString *error) {
         typeof(self) strongSelf = weakSelf;
         if (!strongSelf || gen != strongSelf.translationGeneration) return;
         if (ok) {
-            strongSelf.resultView.string = result ?: @"";
+            if (![strongSelf.resultView.string isEqualToString:result]) {
+                // The incremental deltas normally already delivered the final
+                // text; replace only when they diverged (e.g. a very short
+                // result that streamed as a single delta).
+                strongSelf.resultView.string = result ?: @"";
+            }
+            // Finalize the document height so the first scroll after the
+            // translation has a stable range (no mid-scroll layout catch-up).
+            [strongSelf.resultView.layoutManager
+                ensureLayoutForTextContainer:strongSelf.resultView.textContainer];
             strongSelf.statusLabel.stringValue = @"完成";
         } else {
             strongSelf.statusLabel.stringValue = error ?: @"错误";
