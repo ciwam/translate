@@ -8,7 +8,6 @@
 namespace {
 
 const char *kProviderNames[] = {
-    "硅基流动 · DeepSeek-V3.2",
     "智谱 · GLM-4-Flash",
     "硅基流动 · Qwen2.5-7B-Instruct",
 };
@@ -23,19 +22,13 @@ const char *kTargetNames[] = {
     "西班牙语",
 };
 
-constexpr int kProviderCount = 3;
+constexpr int kProviderCount = 2;
 constexpr int kTargetCount = 7;
 constexpr int kDefaultTarget = 1; // Simplified Chinese
 
 inline translate::Provider to_cpp(translate_provider_t p) {
-    switch (p) {
-        case TRANSLATE_PROVIDER_ZHIPU:
-            return translate::Provider::Zhipu;
-        case TRANSLATE_PROVIDER_SILICONFLOW_QWEN:
-            return translate::Provider::SiliconFlow_Qwen;
-        default:
-            return translate::Provider::SiliconFlow;
-    }
+    return (p == TRANSLATE_PROVIDER_SILICONFLOW) ? translate::Provider::SiliconFlow
+                                                 : translate::Provider::Zhipu;
 }
 
 inline translate::Target to_cpp(translate_target_t t) {
@@ -47,13 +40,15 @@ inline translate::Target to_cpp(translate_target_t t) {
 void translate_run(translate_provider_t provider,
                    translate_target_t target,
                    const char *api_key,
+                   const char *glossary,
                    const char *text,
                    translate_callback_t callback,
                    void *userdata) {
     translate::Translator engine;
     std::string key = api_key ? api_key : "";
+    std::string gloss = glossary ? glossary : "";
     std::string src = text ? text : "";
-    engine.translate(to_cpp(provider), to_cpp(target), key, src,
+    engine.translate(to_cpp(provider), to_cpp(target), key, gloss, src,
                      [callback, userdata](const translate::Result &r) {
                          char *out_text = r.ok ? strdup(r.text.c_str()) : nullptr;
                          char *out_err = (!r.ok) ? strdup(r.error.c_str()) : nullptr;
@@ -64,15 +59,17 @@ void translate_run(translate_provider_t provider,
 void translate_run_stream(translate_provider_t provider,
                           translate_target_t target,
                           const char *api_key,
+                          const char *glossary,
                           const char *text,
                           translate_stream_callback_t callback,
                           void *userdata) {
     translate::Translator engine;
     std::string key = api_key ? api_key : "";
+    std::string gloss = glossary ? glossary : "";
     std::string src = text ? text : "";
     bool done = false; // translate() always invokes cb exactly once
     engine.translate(
-        to_cpp(provider), to_cpp(target), key, src,
+        to_cpp(provider), to_cpp(target), key, gloss, src,
         [callback, userdata, &done](const translate::Result &r) {
             if (done) return;
             done = true;

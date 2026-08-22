@@ -83,15 +83,18 @@ static void tt_stream_trampoline(translate_event_t event,
 + (void)translateProvider:(int)provider
                    target:(int)target
                    apiKey:(NSString *)apiKey
+                 glossary:(NSString *)glossary
                      text:(NSString *)text
                completion:(TTCoreCompletion)completion {
     TTCoreCompletion block = [completion copy];
     NSString *key = apiKey ?: @"";
+    NSString *gloss = glossary ?: @"";
     NSString *src = text ?: @"";
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         translate_run((translate_provider_t)provider,
                       (translate_target_t)target,
                       [key UTF8String],
+                      [gloss UTF8String],
                       [src UTF8String],
                       tt_trampoline,
                       (__bridge_retained void *)block);
@@ -101,6 +104,7 @@ static void tt_stream_trampoline(translate_event_t event,
 + (void)translateProvider:(int)provider
                    target:(int)target
                    apiKey:(NSString *)apiKey
+                 glossary:(NSString *)glossary
                      text:(NSString *)text
                     delta:(TTCoreDelta)delta
                completion:(TTCoreCompletion)completion {
@@ -108,11 +112,13 @@ static void tt_stream_trampoline(translate_event_t event,
     ctx.delta = [delta copy];
     ctx.completion = [completion copy];
     NSString *key = apiKey ?: @"";
+    NSString *gloss = glossary ?: @"";
     NSString *src = text ?: @"";
     dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
         translate_run_stream((translate_provider_t)provider,
                              (translate_target_t)target,
                              [key UTF8String],
+                             [gloss UTF8String],
                              [src UTF8String],
                              tt_stream_trampoline,
                              (__bridge_retained void *)ctx);

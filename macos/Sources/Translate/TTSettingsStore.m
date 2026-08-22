@@ -14,6 +14,7 @@ static NSString *const kKeyFileName = @"encryption.key";
 static NSString *const kSettingsProviderKey = @"providerIndex";
 static NSString *const kSettingsTargetKey = @"targetIndex";
 static NSString *const kSettingsApiKeyKey = @"apiKeyCipher";
+static NSString *const kSettingsGlossaryKey = @"glossary";
 static NSString *const kSettingsFormatKey = @"formatVersion";
 static const NSInteger kSettingsFormatVersion = 1;
 
@@ -47,9 +48,15 @@ static const size_t kIVSize = 16;  // AES block size
     return [[NSString alloc] initWithData:plain encoding:NSUTF8StringEncoding];
 }
 
++ (nullable NSString *)glossary {
+    id value = [self settingsDictionary][kSettingsGlossaryKey];
+    return [value isKindOfClass:[NSString class]] ? value : nil;
+}
+
 + (void)saveProviderIndex:(NSInteger)provider
               targetIndex:(NSInteger)target
-                   apiKey:(nullable NSString *)apiKey {
+                   apiKey:(nullable NSString *)apiKey
+                 glossary:(nullable NSString *)glossary {
     NSString *plain = apiKey ?: @"";
     NSData *key = [self loadOrCreateEncryptionKey];
     NSData *cipher = [self encrypt:[plain dataUsingEncoding:NSUTF8StringEncoding] key:key];
@@ -63,6 +70,7 @@ static const size_t kIVSize = 16;  // AES block size
     settings[kSettingsProviderKey] = @(provider);
     settings[kSettingsTargetKey] = @(target);
     settings[kSettingsApiKeyKey] = [cipher base64EncodedStringWithOptions:0];
+    settings[kSettingsGlossaryKey] = glossary ?: @"";
     settings[kSettingsFormatKey] = @(kSettingsFormatVersion);
     [settings writeToURL:[self settingsFileURL] atomically:YES];
 }
@@ -177,7 +185,7 @@ static const size_t kIVSize = 16;  // AES block size
     NSInteger provider = [defaults integerForKey:kLegacyProviderKey];
     NSInteger target = [defaults integerForKey:kLegacyTargetKey];
     NSString *apiKey = [defaults stringForKey:kLegacyApiKeyKey] ?: @"";
-    [self saveProviderIndex:provider targetIndex:target apiKey:apiKey];
+    [self saveProviderIndex:provider targetIndex:target apiKey:apiKey glossary:@""];
     [defaults removeObjectForKey:kLegacyProviderKey];
     [defaults removeObjectForKey:kLegacyTargetKey];
     [defaults removeObjectForKey:kLegacyApiKeyKey];

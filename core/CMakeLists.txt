@@ -4,6 +4,7 @@ cmake_minimum_required(VERSION 3.20)
 # (include/translate/translate.h) usable from Objective-C, C#, and JNI.
 add_library(translate_core STATIC
     src/translator.cpp
+    src/openai_translator.cpp
     src/http_curl.cpp
     src/normalize_icu.cpp
     src/translate_capi.cpp

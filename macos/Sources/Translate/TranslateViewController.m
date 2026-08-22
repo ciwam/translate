@@ -20,6 +20,7 @@
 @property (nonatomic, strong) NSPanel *settingsPanel;
 @property (nonatomic, strong) NSPopUpButton *panelProviderPopup;
 @property (nonatomic, strong) NSSecureTextField *panelApiKeyField;
+@property (nonatomic, strong) NSTextView *panelGlossaryView;
 @end
 
 @implementation TranslateViewController
@@ -159,9 +160,11 @@
     NSInteger provider = [TTSettingsStore providerIndex];
     if (provider == NSNotFound) provider = 0;
     NSString *key = [TTSettingsStore apiKey] ?: @"";
+    NSString *glossary = [TTSettingsStore glossary] ?: @"";
     [TTSettingsStore saveProviderIndex:provider
                            targetIndex:self.targetPopup.indexOfSelectedItem
-                                apiKey:key];
+                                apiKey:key
+                              glossary:glossary];
 }
 
 #pragma mark - Settings modal panel
@@ -181,7 +184,7 @@
     }
 
     NSPanel *panel = [[NSPanel alloc]
-        initWithContentRect:NSMakeRect(0, 0, 400, 150)
+        initWithContentRect:NSMakeRect(0, 0, 420, 340)
                   styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
                     backing:NSBackingStoreBuffered
                       defer:NO];
@@ -218,6 +221,22 @@
     self.panelApiKeyField.placeholderString = @"在此填写 API Key";
     self.panelApiKeyField.stringValue = [TTSettingsStore apiKey] ?: @"";
     [stack addArrangedSubview:[self rowWithTitle:@"API Key" control:self.panelApiKeyField]];
+
+    NSTextField *glossaryLabel = [NSTextField labelWithString:@"术语词典（每行一条：术语 = 翻译）"];
+    glossaryLabel.font = [NSFont systemFontOfSize:11];
+    glossaryLabel.textColor = [NSColor secondaryLabelColor];
+    [stack addArrangedSubview:glossaryLabel];
+
+    self.panelGlossaryView = [[NSTextView alloc] init];
+    self.panelGlossaryView.string = [TTSettingsStore glossary] ?: @"";
+    // scrollForTextView sets the text-did-change delegate, but textDidChange
+    // early-returns for any view other than sourceView, so editing the glossary
+    // here never triggers a translation.
+    NSScrollView *glossaryScroll = [self scrollForTextView:self.panelGlossaryView
+                                                   height:120
+                                                 editable:YES
+                                                growable:NO];
+    [stack addArrangedSubview:glossaryScroll];
 
     NSStackView *buttons = [[NSStackView alloc] init];
     buttons.orientation = NSUserInterfaceLayoutOrientationHorizontal;
@@ -256,7 +275,8 @@
     if (target == NSNotFound) target = [TTCore defaultTargetIndex];
     [TTSettingsStore saveProviderIndex:self.panelProviderPopup.indexOfSelectedItem
                            targetIndex:target
-                                apiKey:self.panelApiKeyField.stringValue ?: @""];
+                                apiKey:self.panelApiKeyField.stringValue ?: @""
+                              glossary:self.panelGlossaryView.string ?: @""];
     [self closeSettingsPanel];
 }
 
@@ -283,6 +303,7 @@
     self.settingsPanel = nil;
     self.panelProviderPopup = nil;
     self.panelApiKeyField = nil;
+    self.panelGlossaryView = nil;
     [parent makeKeyAndOrderFront:nil];
 }
 
@@ -324,6 +345,7 @@ static const NSTimeInterval kAutoTranslateDelay = 0.8;
     pIndex = MIN(pIndex, [TTCore providerCount] - 1);
     NSInteger tIndex = MIN(self.targetPopup.indexOfSelectedItem, [TTCore targetCount] - 1);
     NSString *key = [TTSettingsStore apiKey] ?: @"";
+    NSString *glossary = [TTSettingsStore glossary] ?: @"";
 
     [self save];
 
@@ -335,6 +357,7 @@ static const NSTimeInterval kAutoTranslateDelay = 0.8;
     [TTCore translateProvider:(int)pIndex
                        target:(int)tIndex
                        apiKey:key
+                     glossary:glossary
                          text:raw
                         delta:^(NSString *partial) { // main queue
         typeof(self) strongSelf = weakSelf;

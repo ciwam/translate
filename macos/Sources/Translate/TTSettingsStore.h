@@ -17,9 +17,14 @@ NS_ASSUME_NONNULL_BEGIN
    memory, never on disk. */
 + (nullable NSString *)apiKey;
 
+/* User terminology dictionary, one "term = translation" per line. Stored in
+   plaintext (not sensitive). Nil when unset. */
++ (nullable NSString *)glossary;
+
 + (void)saveProviderIndex:(NSInteger)provider
               targetIndex:(NSInteger)target
-                   apiKey:(nullable NSString *)apiKey;
+                   apiKey:(nullable NSString *)apiKey
+                 glossary:(nullable NSString *)glossary;
 
 @end
 

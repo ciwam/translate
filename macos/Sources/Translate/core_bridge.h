@@ -25,14 +25,16 @@ typedef void (^TTCoreDelta)(NSString *_Nullable partial);
 + (void)translateProvider:(int)provider
                    target:(int)target
                    apiKey:(NSString *)apiKey
+                 glossary:(NSString *)glossary
                      text:(NSString *)text
                completion:(TTCoreCompletion)completion;
 
 /* Streaming variant: `delta` is called as translation progresses, `completion`
-   exactly once at the end. `delta` may be nil. */
+   exactly once at the end. `delta` may be nil. `glossary` may be nil. */
 + (void)translateProvider:(int)provider
                    target:(int)target
                    apiKey:(NSString *)apiKey
+                 glossary:(NSString *)glossary
                      text:(NSString *)text
                     delta:(TTCoreDelta _Nullable)delta
                completion:(TTCoreCompletion)completion;

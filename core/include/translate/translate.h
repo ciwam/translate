@@ -7,9 +7,8 @@ extern "C" {
 
 /* Provider selection (mirrors the configured AI models). */
 typedef enum {
-    TRANSLATE_PROVIDER_SILICONFLOW = 0, /* DeepSeek-V3.2 */
-    TRANSLATE_PROVIDER_ZHIPU = 1,       /* GLM-4-Flash */
-    TRANSLATE_PROVIDER_SILICONFLOW_QWEN = 2 /* Qwen2.5-7B-Instruct */
+    TRANSLATE_PROVIDER_ZHIPU = 0,       /* GLM-4-Flash */
+    TRANSLATE_PROVIDER_SILICONFLOW = 1  /* Qwen2.5-7B-Instruct */
 } translate_provider_t;
 
 /* Target language selection. */
@@ -36,10 +35,12 @@ typedef void (*translate_callback_t)(int ok,
                                      const char *error,
                                      void *userdata);
 
-/* Synchronous translate. Blocks until the request completes. */
+/* Synchronous translate. Blocks until the request completes. `glossary` may be
+   NULL (no terminology dictionary): each line is "term = translation". */
 void translate_run(translate_provider_t provider,
                    translate_target_t target,
                    const char *api_key,
+                   const char *glossary,
                    const char *text,
                    translate_callback_t callback,
                    void *userdata);
@@ -63,10 +64,12 @@ typedef void (*translate_stream_callback_t)(translate_event_t event,
 /* Streaming translate. DELTA events allow progressive rendering; each DELTA
    `text` is the ENTIRE result so far, so a front-end overwrites its display.
    Exactly one DONE or ERROR is delivered (never both, never extra). Synchronous
-   (blocks until the stream ends); callback invoked on the calling thread. */
+   (blocks until the stream ends); callback invoked on the calling thread.
+   `glossary` may be NULL (no terminology dictionary). */
 void translate_run_stream(translate_provider_t provider,
                           translate_target_t target,
                           const char *api_key,
+                          const char *glossary,
                           const char *text,
                           translate_stream_callback_t callback,
                           void *userdata);
