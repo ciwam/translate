@@ -106,14 +106,20 @@
     return h;
 }
 
-// Critical: the text view must track the scroll-view width and have a non-zero
-// frame, otherwise its textContainer is 0-sized and it can't be clicked into.
+// Critical: the text view must track the scroll-view width through
+// autoresizing. Give it a height only — a manually-set start width (even a
+// 100pt fallback) gets ADDED to the clip's growth when the scroll view lays
+// out, leaving the document ~100pt wider than the viewport and enabling
+// horizontal panning. A zero-width start lets the clip drive the width; after
+// layout it equals the clip width, so text wraps and long unbreakable tokens
+// clip at the right edge instead of extending the scrollable area.
 - (NSScrollView *)scrollForTextView:(NSTextView *)textView
                              height:(CGFloat)height
                            editable:(BOOL)editable
                            growable:(BOOL)growable {
     NSScrollView *scroll = [[NSScrollView alloc] init];
     scroll.hasVerticalScroller = YES;
+    scroll.hasHorizontalScroller = NO;
     scroll.borderType = NSBezelBorder;
     scroll.translatesAutoresizingMaskIntoConstraints = NO;
 
@@ -127,8 +133,7 @@
     textView.autoresizingMask = NSViewWidthSizable;
     textView.textContainer.widthTracksTextView = YES;
     textView.textContainer.heightTracksTextView = NO;
-    CGFloat w = MAX(scroll.contentSize.width, 100);
-    textView.frame = NSMakeRect(0, 0, w, MAX(scroll.contentSize.height, height));
+    textView.frame = NSMakeRect(0, 0, 0, MAX(scroll.contentSize.height, height));
 
     scroll.documentView = textView;
     if (growable) {
