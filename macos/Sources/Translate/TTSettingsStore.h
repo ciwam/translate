@@ -13,9 +13,17 @@ NS_ASSUME_NONNULL_BEGIN
 + (NSInteger)providerIndex;
 + (NSInteger)targetIndex;
 
-/* Decrypted API key; nil when nothing is stored. Plaintext exists only in
-   memory, never on disk. */
-+ (nullable NSString *)apiKey;
+/* Decrypted API key for ONE provider. Each provider (GLM-4-Flash,
+   Qwen2.5-7B-Instruct) has its own key — a Zhipu key never authenticates
+   against SiliconFlow. Returns nil when nothing is stored for that provider.
+   Legacy single-key files (format 1) are honored for the provider that was
+   selected when the legacy key was saved. Plaintext exists only in memory,
+   never on disk. */
++ (nullable NSString *)apiKeyForProvider:(NSInteger)provider;
+
+/* All stored keys, keyed by provider index. Legacy files surface their single
+   key under the provider it was saved with. */
++ (NSDictionary<NSNumber *, NSString *> *)allApiKeys;
 
 /* User terminology dictionary, one "term = translation" per line. Stored in
    plaintext (not sensitive). Nil when unset. */
@@ -23,7 +31,7 @@ NS_ASSUME_NONNULL_BEGIN
 
 + (void)saveProviderIndex:(NSInteger)provider
               targetIndex:(NSInteger)target
-                   apiKey:(nullable NSString *)apiKey
+                  apiKeys:(nullable NSDictionary<NSNumber *, NSString *> *)apiKeysByProvider
                  glossary:(nullable NSString *)glossary;
 
 @end

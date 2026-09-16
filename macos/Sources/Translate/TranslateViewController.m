@@ -22,6 +22,11 @@
 @property (nonatomic, strong) NSPanel *settingsPanel;
 @property (nonatomic, strong) NSPopUpButton *panelProviderPopup;
 @property (nonatomic, strong) NSSecureTextField *panelApiKeyField;
+// Edit-in-progress keys, keyed by provider index. Switching the model moves
+// the field's text to the provider it belongs to and swaps in the other
+// provider's key, so each model keeps its own credential.
+@property (nonatomic, strong) NSMutableDictionary<NSNumber *, NSString *> *panelKeysByProvider;
+@property (nonatomic, assign) NSInteger panelActiveProvider;
 @property (nonatomic, strong) NSTextView *panelGlossaryView;
 @end
 
@@ -166,18 +171,19 @@
 - (void)save {
     NSInteger provider = [TTSettingsStore providerIndex];
     if (provider == NSNotFound) provider = 0;
-    NSString *key = [TTSettingsStore apiKey] ?: @"";
     NSString *glossary = [TTSettingsStore glossary] ?: @"";
     [TTSettingsStore saveProviderIndex:provider
                            targetIndex:self.targetPopup.indexOfSelectedItem
-                                apiKey:key
+                                apiKeys:[TTSettingsStore allApiKeys]
                               glossary:glossary];
 }
 
 #pragma mark - Settings modal panel
 
 - (void)presentSettingsIfNeeded {
-    if ([TTSettingsStore apiKey].length == 0) {
+    NSInteger provider = [TTSettingsStore providerIndex];
+    if (provider == NSNotFound) provider = 0;
+    if ([TTSettingsStore apiKeyForProvider:provider].length == 0) {
         [self presentSettingsPanel:nil];
     }
 }
@@ -221,12 +227,24 @@
     }
     NSInteger provider = [TTSettingsStore providerIndex];
     if (provider == NSNotFound || provider < 0) provider = 0;
-    [self.panelProviderPopup selectItemAtIndex:MIN(provider, pc - 1)];
+    self.panelActiveProvider = MIN(provider, pc - 1);
+    [self.panelProviderPopup selectItemAtIndex:self.panelActiveProvider];
+    // Switching the model swaps the key field to that provider's own key
+    // (each vendor authenticates only against its own endpoint).
+    [self.panelProviderPopup setTarget:self];
+    [self.panelProviderPopup setAction:@selector(providerPopupChanged:)];
     [stack addArrangedSubview:[self rowWithTitle:@"模型" control:self.panelProviderPopup]];
 
+    self.panelKeysByProvider = [[NSMutableDictionary alloc] init];
+    for (int i = 0; i < pc; i++) {
+        NSString *k = [TTSettingsStore apiKeyForProvider:i];
+        if (k.length) self.panelKeysByProvider[@(i)] = k;
+    }
+
     self.panelApiKeyField = [[NSSecureTextField alloc] init];
-    self.panelApiKeyField.placeholderString = @"在此填写 API Key";
-    self.panelApiKeyField.stringValue = [TTSettingsStore apiKey] ?: @"";
+    self.panelApiKeyField.placeholderString = @"在此填写当前模型的 API Key";
+    self.panelApiKeyField.stringValue =
+        self.panelKeysByProvider[@(self.panelActiveProvider)] ?: @"";
     [stack addArrangedSubview:[self rowWithTitle:@"API Key" control:self.panelApiKeyField]];
 
     NSTextField *glossaryLabel = [NSTextField labelWithString:@"术语词典（每行一条：术语 = 翻译）"];
@@ -277,12 +295,33 @@
     [NSApp runModalForWindow:panel];
 }
 
+// Model popup changed: file the currently edited key under the provider it
+// was typed for, then show the newly selected provider's own key.
+- (void)providerPopupChanged:(id)sender {
+    NSInteger selected = self.panelProviderPopup.indexOfSelectedItem;
+    if (selected == self.panelActiveProvider) return;
+    NSString *edited = self.panelApiKeyField.stringValue ?: @"";
+    if (edited.length) {
+        self.panelKeysByProvider[@(self.panelActiveProvider)] = edited;
+    } else {
+        [self.panelKeysByProvider removeObjectForKey:@(self.panelActiveProvider)];
+    }
+    self.panelActiveProvider = selected;
+    self.panelApiKeyField.stringValue = self.panelKeysByProvider[@(selected)] ?: @"";
+}
+
 - (void)confirmSettingsTapped:(id)sender {
     NSInteger target = [TTSettingsStore targetIndex];
     if (target == NSNotFound) target = [TTCore defaultTargetIndex];
+    NSString *edited = self.panelApiKeyField.stringValue ?: @"";
+    if (edited.length) {
+        self.panelKeysByProvider[@(self.panelActiveProvider)] = edited;
+    } else {
+        [self.panelKeysByProvider removeObjectForKey:@(self.panelActiveProvider)];
+    }
     [TTSettingsStore saveProviderIndex:self.panelProviderPopup.indexOfSelectedItem
                            targetIndex:target
-                                apiKey:self.panelApiKeyField.stringValue ?: @""
+                                apiKeys:self.panelKeysByProvider
                               glossary:self.panelGlossaryView.string ?: @""];
     [self closeSettingsPanel];
 }
@@ -310,6 +349,7 @@
     self.settingsPanel = nil;
     self.panelProviderPopup = nil;
     self.panelApiKeyField = nil;
+    self.panelKeysByProvider = nil;
     self.panelGlossaryView = nil;
     [parent makeKeyAndOrderFront:nil];
 }
@@ -366,7 +406,7 @@ static const NSTimeInterval kAutoTranslateDelay = 0.8;
     if (pIndex == NSNotFound || pIndex < 0) pIndex = 0;
     pIndex = MIN(pIndex, [TTCore providerCount] - 1);
     NSInteger tIndex = MIN(self.targetPopup.indexOfSelectedItem, [TTCore targetCount] - 1);
-    NSString *key = [TTSettingsStore apiKey] ?: @"";
+    NSString *key = [TTSettingsStore apiKeyForProvider:pIndex] ?: @"";
     NSString *glossary = [TTSettingsStore glossary] ?: @"";
 
     [self save];
