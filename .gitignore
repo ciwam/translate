@@ -16,3 +16,6 @@ cmake_install.cmake
 
 # MCP/CLI 调试构建产物
 .build-cli/
+
+# DMG 分发包
+macos/dist/
