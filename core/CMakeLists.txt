@@ -41,3 +41,9 @@ endif()
 
 find_package(ICU REQUIRED COMPONENTS uc i18n data)
 target_link_libraries(translate_core PUBLIC ICU::uc ICU::i18n ICU::data)
+
+# --- Debug CLI: JSON-over-stdin console front-end (MCP debug channel) ---
+# Not part of the app bundles; built on demand via
+#   cmake --build <build-dir> --target translate_cli
+add_executable(translate_cli tools/translate_cli.cpp)
+target_link_libraries(translate_cli PRIVATE translate_core)

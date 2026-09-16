@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <list>
 #include <memory>
@@ -61,15 +62,16 @@ bool is_protected_token(const std::string &tok) {
             else if (c >= 'a' && c <= 'z') ++lower;
         }
         if ((c >= '0' && c <= '9') || c == '_' || c == '/' || c == '%' ||
-            c == '\\' || c == '[' || c == ']' || c == ':' || c == '=' ||
+            c == '\\' || c == '[' || c == ']' || c == '=' ||
             c == '<' || c == '>' || c == '$' || c == '{' || c == '}' ||
             c == '@' || c == '#' || c == '&' || c == '+' || c == '*' ||
             c == '~' || c == '^' || c == '|' || c == '`') {
             technical = true;
         } else if ((c == '.' || c == ',' || c == ';' || c == '(' || c == ')' ||
+                    c == ':' ||
                     c == '!' || c == '?') &&
                    i + 1 < n) {
-            technical = true; // internal: CSV/extension/call, not sentence-final
+            technical = true; // internal: CSV/extension/call/URL, not sentence-final
         }
     }
     // Mixed-case identifier (NSFont, CFType, TranslateViewController). Pure
@@ -77,6 +79,10 @@ bool is_protected_token(const std::string &tok) {
     // verbatim inside spans, and carving them out shrinks spans into fragments
     // the model tends to drop.
     if (upper >= 2 && lower >= 1) technical = true;
+    // NOTE: word+colon labels ("ERROR:", "client:") are deliberately PROSE.
+    // Protecting them froze whole log lines when the model translated the
+    // label (run r3); placeholders now guard the truly structural tokens, and
+    // a translated "WARNING:" -> "警告:" is acceptable for the audience.
     return technical && ascii * 2 > tok.size();
 }
 
@@ -105,99 +111,172 @@ void analyze_technical(const std::string &src, bool &have_tech) {
     }
 }
 
-// One whitespace-bounded token of a source line. Protected tokens are kept
-// verbatim; prose tokens carry the index of the span that translates them.
-struct Seg {
-    std::string text; // whitespace prefix + token (or a whitespace-only run)
-    bool protected_token = false;
-    int span = -1; // index into the prose span list when prose, else -1
+// Splice v2 unit = a whole source line. A line is translatable when it holds
+// at least one non-protected (prose) token; purely technical lines are kept
+// verbatim and never sent to the model.
+struct LineInfo {
+    std::string text;       // line content without the trailing \r
+    bool has_prose = false; // >= 1 translatable token
 };
 
-// Split `src` into lines and segments. Protected tokens become standalone
-// segments (spliced verbatim on reassembly); contiguous prose tokens are
-// grouped into spans. Returns the trimmed text of each prose span, in order.
-// The model never sees this structure — it receives only the span texts.
-std::vector<std::string> build_lines(const std::string &src,
-                                     std::vector<std::vector<Seg>> &out_lines) {
-    out_lines.clear();
-    std::vector<std::string> spans;
-    size_t pos = 0;
-    const size_t n = src.size();
-    for (;;) {
-        size_t nl = src.find('\n', pos);
-        std::string line =
-            src.substr(pos, nl == std::string::npos ? std::string::npos : nl - pos);
-        if (!line.empty() && line.back() == '\r') line.pop_back();
-        std::vector<Seg> segs;
-        size_t i = 0;
-        const size_t L = line.size();
-        while (i < L) {
-            size_t wb = i;
-            while (i < L && is_ws_char(line[i])) ++i;
-            std::string ws = line.substr(wb, i - wb);
-            if (i == L) { // trailing whitespace stays attached to the last seg
-                if (!segs.empty()) segs.back().text += ws;
-                else if (!ws.empty()) segs.push_back({ws, false, -1});
-                break;
-            }
-            size_t tb = i;
-            while (i < L && !is_ws_char(line[i])) ++i;
-            std::string tok = line.substr(tb, i - tb);
-            segs.push_back({ws + tok, is_protected_token(tok), -1});
-        }
-        // Group contiguous prose tokens into spans.
-        for (size_t k = 0; k < segs.size();) {
-            if (segs[k].protected_token) { ++k; continue; }
-            size_t e = k;
-            std::string combined;
-            while (e < segs.size() && !segs[e].protected_token) {
-                combined += segs[e].text;
-                ++e;
-            }
-            if (combined.find_first_not_of(" \t\r") == std::string::npos) {
-                k = e; // whitespace-only run: no translatable prose
-                continue;
-            }
-            size_t b = combined.find_first_not_of(" \t\r");
-            size_t en = combined.find_last_not_of(" \t\r");
-            int id = static_cast<int>(spans.size());
-            spans.push_back(combined.substr(b, en - b + 1));
-            for (size_t q = k; q < e; ++q) segs[q].span = id;
-            k = e;
-        }
-        out_lines.push_back(std::move(segs));
-        if (nl == std::string::npos) break;
-        pos = nl + 1;
+// True when the line contains at least one token the model should translate.
+bool line_has_prose(const std::string &line) {
+    size_t i = 0;
+    const size_t n = line.size();
+    while (i < n) {
+        while (i < n && is_ws_char(line[i])) ++i;
+        const size_t s = i;
+        while (i < n && !is_ws_char(line[i])) ++i;
+        if (i == s) break;
+        if (!is_protected_token(line.substr(s, i - s))) return true;
     }
-    return spans;
+    return false;
 }
 
-// Rebuild the translated text: protected tokens verbatim, each prose span
-// replaced by its translation (falling back to the original span text when the
-// translation is empty or was rejected by the quality guard).
-std::string reassemble(const std::vector<std::vector<Seg>> &lines,
-                       const std::vector<std::string> &spans,
-                       const std::vector<std::string> &translations) {
-    std::string out;
-    for (const auto &segs : lines) {
-        for (size_t i = 0; i < segs.size(); ++i) {
-            const Seg &seg = segs[i];
-            if (!seg.protected_token && seg.span >= 0) {
-                if (i == 0 || segs[i - 1].span != seg.span) { // span start
-                    size_t m = 0;
-                    while (m < seg.text.size() && is_ws_char(seg.text[m])) ++m;
-                    out.append(seg.text, 0, m); // leading whitespace
-                    const std::string &tr = translations[static_cast<size_t>(seg.span)];
-                    out += tr.empty() ? spans[static_cast<size_t>(seg.span)] : tr;
+// ---- 占位符掩码 (splice v2.1) ----
+// Even with few-shot anchoring, small models still translated protected tokens
+// inside whole lines ("CrashLoopBackOff" -> "崩溃回环", "WARNING:" -> "警告:").
+// Masking replaces every protected token with a [[N]] placeholder before the
+// request and restores it verbatim afterwards, making token preservation
+// structural instead of a matter of model discipline.
+std::string normalize_fullwidth_punct(const std::string &s);
+
+// Replace protected tokens with [[N]] placeholders, preserving all whitespace.
+// Returns false when the unit holds no protected token or already contains
+// "[[" (placeholder collision) — the caller then sends the unit unmasked.
+bool mask_unit(const std::string &unit, std::string &masked,
+               std::vector<std::string> &tokens) {
+    if (unit.find("[[") != std::string::npos) return false;
+    masked.clear();
+    tokens.clear();
+    size_t i = 0;
+    const size_t n = unit.size();
+    while (i < n) {
+        const size_t ws = i;
+        while (i < n && is_ws_char(unit[i])) ++i;
+        masked.append(unit, ws, i - ws);
+        if (i >= n) break;
+        const size_t s0 = i;
+        while (i < n && !is_ws_char(unit[i])) ++i;
+        std::string tok = unit.substr(s0, i - s0);
+        if (is_protected_token(tok)) {
+            // Keep sentence/quote characters OUT of the placeholder: a bare
+            // number's sentence period ("… port 8080.") reads broken when
+            // restored mid-sentence (run r6), and a swallowed closing quote
+            // ("app-7d9f'") unbalances the masked line, luring the model into
+            // adding a stray second quote (run r7).
+            std::string body = tok;
+            std::string tail;
+            if (body.size() >= 2 && body.back() == '.') {
+                const std::string prefix = body.substr(0, body.size() - 1);
+                if (!prefix.empty() &&
+                    prefix.find_first_not_of("0123456789") == std::string::npos) {
+                    body = prefix;
+                    tail = ".";
                 }
-                // continuation segments of a span are covered by the one piece
+            }
+            while (body.size() >= 2 &&
+                   (body.back() == '\'' || body.back() == '"')) {
+                tail = body.back() + tail;
+                body.pop_back();
+            }
+            if (body.empty()) { // degenerate: pure punctuation — keep verbatim
+                masked += tok;
             } else {
-                out += seg.text;
+                masked += "[[" + std::to_string(tokens.size() + 1) + "]]" + tail;
+                tokens.push_back(std::move(body));
+            }
+        } else {
+            masked += tok;
+        }
+    }
+    return !tokens.empty();
+}
+
+// Map the full-width punctuation small models like to emit back to ASCII, so
+// placeholder scanning works regardless of the model's punctuation fashion.
+std::string normalize_fullwidth_punct(const std::string &s) {
+    std::string r;
+    r.reserve(s.size());
+    size_t i = 0;
+    const size_t n = s.size();
+    while (i < n) {
+        unsigned char c0 = static_cast<unsigned char>(s[i]);
+        if (c0 == 0xEF && i + 2 < n) { // U+FF00 half-width forms block
+            unsigned char c1 = static_cast<unsigned char>(s[i + 1]);
+            unsigned char c2 = static_cast<unsigned char>(s[i + 2]);
+            if (c1 == 0xBC) {
+                switch (c2) {
+                    case 0x8C: r += ','; i += 3; continue; // ，
+                    case 0x9A: r += ':'; i += 3; continue; // ：
+                    case 0x9B: r += ';'; i += 3; continue; // ；
+                    case 0x81: r += '!'; i += 3; continue; // ！
+                    case 0x9F: r += '?'; i += 3; continue; // ？
+                    case 0x88: r += '('; i += 3; continue; // （
+                    case 0x89: r += ')'; i += 3; continue; // ）
+                    case 0xBB: r += '['; i += 3; continue; // ［
+                    case 0xBD: r += ']'; i += 3; continue; // ］
+                }
+            }
+        } else if (c0 == 0xE3 && i + 2 < n) { // CJK punctuation block
+            unsigned char c1 = static_cast<unsigned char>(s[i + 1]);
+            unsigned char c2 = static_cast<unsigned char>(s[i + 2]);
+            if (c1 == 0x80 && c2 == 0x90) { r += '['; i += 3; continue; } // 【
+            if (c1 == 0x80 && c2 == 0x91) { r += ']'; i += 3; continue; } // 】
+        } else if (c0 == 0xE2 && i + 2 < n) {
+            unsigned char c1 = static_cast<unsigned char>(s[i + 1]);
+            unsigned char c2 = static_cast<unsigned char>(s[i + 2]);
+            if (c1 == 0x80 && (c2 == 0x9C || c2 == 0x9D)) {
+                r += '"'; i += 3; continue; // “ ”
             }
         }
-        out += '\n';
+        r += s[i];
+        ++i;
     }
-    return out;
+    return r;
+}
+
+// Restore [[N]] placeholders (after full-width normalization). Fails when ANY
+// placeholder of the unit is missing, malformed, or out of range — the line
+// then falls back to its original text, never to a half-restored hybrid.
+// (Run r7: the model dropped [[1]] entirely and restore "succeeded", leaving
+// "WARNING:" out of the output; the whole-text net then rejected the result.)
+bool restore_unit(const std::string &reply,
+                  const std::vector<std::string> &tokens, std::string &out) {
+    std::string s = normalize_fullwidth_punct(reply);
+    out.clear();
+    out.reserve(s.size());
+    std::vector<char> seen(tokens.size(), 0);
+    size_t i = 0;
+    const size_t n = s.size();
+    while (i < n) {
+        if (s[i] == '[' && i + 1 < n && s[i + 1] == '[') {
+            const size_t e = s.find("]]", i + 2);
+            if (e == std::string::npos || e - (i + 2) > 3) return false;
+            const std::string num = s.substr(i + 2, e - i - 2);
+            if (num.empty() ||
+                num.find_first_not_of("0123456789") != std::string::npos) {
+                return false;
+            }
+            unsigned long idx = 0;
+            try {
+                idx = std::stoul(num);
+            } catch (...) {
+                return false;
+            }
+            if (idx == 0 || idx > tokens.size()) return false;
+            out += tokens[idx - 1];
+            seen[idx - 1] = 1;
+            i = e + 2;
+        } else {
+            out += s[i];
+            ++i;
+        }
+    }
+    for (const char c : seen) {
+        if (!c) return false; // a placeholder never made it into the reply
+    }
+    return true;
 }
 
 // Split a model reply into translated lines.
@@ -346,17 +425,21 @@ std::string strip_explanations(const std::string &s) {
 }
 
 // ---- 标点强制归位 (设计二.4b) ----
-// Sources that use half-width delimiters (CSV rows, JSON, log columns) must keep
-// them: force the spliced translation's full-width comma/colon/semicolon back to
-// half-width so the format survives. Sentence-final periods are left full-width
-// (narrative style, not structure). Triggered only when the source already uses
-// >= 2 half-width delimiters.
+// Weak models convert half-width punctuation to full-width when writing
+// Chinese, which destroys structured sources (CSV rows, log columns, paths):
+// "nginx[812]:" became "nginx[812]：" in real runs. Force the full-width
+// counterparts back to half-width — per class, and only when the source line
+// actually uses that class: delimiters , : ; (>= 2 occurrences), parens, and
+// double quotes. Sentence-final 。 is left full-width (narrative style).
 std::string repunct(const std::string &out, const std::string &src) {
     size_t half = 0;
+    bool has_paren = false, has_dquote = false;
     for (char c : src) {
         if (c == ',' || c == ':' || c == ';') ++half;
+        else if (c == '(' || c == ')') has_paren = true;
+        else if (c == '"') has_dquote = true;
     }
-    if (half < 2) return out;
+    if (half < 2 && !has_paren && !has_dquote) return out;
     std::string r;
     r.reserve(out.size());
     const size_t n = out.size();
@@ -365,9 +448,17 @@ std::string repunct(const std::string &out, const std::string &src) {
         if (i + 2 < n && static_cast<unsigned char>(out[i]) == 0xEF &&
             static_cast<unsigned char>(out[i + 1]) == 0xBC) {
             unsigned char b3 = static_cast<unsigned char>(out[i + 2]);
-            if (b3 == 0x8C) { r += ','; i += 3; continue; }  // ，-> ,
-            if (b3 == 0x9A) { r += ':'; i += 3; continue; }  // ：-> :
-            if (b3 == 0x9B) { r += ';'; i += 3; continue; }  // ；-> ;
+            if (half >= 2 && b3 == 0x8C) { r += ','; i += 3; continue; }  // ，-> ,
+            if (half >= 2 && b3 == 0x9A) { r += ':'; i += 3; continue; }  // ：-> :
+            if (half >= 2 && b3 == 0x9B) { r += ';'; i += 3; continue; }  // ；-> ;
+            if (has_paren && b3 == 0x88) { r += '('; i += 3; continue; }  // （-> (
+            if (has_paren && b3 == 0x89) { r += ')'; i += 3; continue; }  // ）-> )
+        }
+        if (has_dquote && i + 2 < n &&
+            static_cast<unsigned char>(out[i]) == 0xE2 &&
+            static_cast<unsigned char>(out[i + 1]) == 0x80) {
+            unsigned char b3 = static_cast<unsigned char>(out[i + 2]);
+            if (b3 == 0x9C || b3 == 0x9D) { r += '"'; i += 3; continue; } // “”-> "
         }
         r += out[i];
         ++i;
@@ -375,10 +466,65 @@ std::string repunct(const std::string &out, const std::string &src) {
     return r;
 }
 
+// Strip leading AND trailing punctuation (ASCII and full-width counterparts)
+// from a token. Used by the preservation check: models turn a token's edge
+// punctuation full-width ("8080." -> "8080。") or drop wrapping parens when
+// they reorder a line ("at UserList (src/x.ts:1)" -> "在 src/x.ts:1 的
+// UserList"); the token BODY must still survive verbatim.
+std::string strip_edge_punct(const std::string &tok) {
+    std::string r = tok;
+    auto trim_end = [&r]() {
+        for (;;) {
+            if (r.empty()) return false;
+            unsigned char c = static_cast<unsigned char>(r.back());
+            if (c == '.' || c == ',' || c == ':' || c == ';' || c == '!' ||
+                c == '?' || c == ')' || c == ']' || c == '}' || c == '"' ||
+                c == '\'') {
+                r.pop_back();
+                continue;
+            }
+            if (r.size() >= 3) {
+                unsigned char c0 = static_cast<unsigned char>(r[r.size() - 3]);
+                unsigned char c1 = static_cast<unsigned char>(r[r.size() - 2]);
+                unsigned char c2 = c;
+                if (c0 == 0xEF && c1 == 0xBC) { // ，：；！？（）
+                    r.resize(r.size() - 3);
+                    continue;
+                }
+                if (c0 == 0xE2 && c1 == 0x80 &&
+                    (c2 == 0x9C || c2 == 0x9D)) { // “ ”
+                    r.resize(r.size() - 3);
+                    continue;
+                }
+            }
+            return true;
+        }
+    };
+    for (;;) {
+        if (!trim_end()) break;      // trailing edge
+        if (r.empty()) break;
+        unsigned char c = static_cast<unsigned char>(r.front());
+        if (c == '(' || c == '[' || c == '{' || c == '"' || c == '\'') {
+            r.erase(r.begin());      // leading edge
+            continue;
+        }
+        if (r.size() >= 3 &&
+            static_cast<unsigned char>(r[0]) == 0xEF &&
+            static_cast<unsigned char>(r[1]) == 0xBC) { // （［｛
+            r.erase(0, 3);
+            continue;
+        }
+        break;
+    }
+    return r;
+}
+
 // ---- 置信度评分 (设计五) ----
 // Safety net: every protected token from the source must survive verbatim in
-// the spliced output. Structure is preserved by construction, so a miss is a
-// pipeline bug; returning the original beats emitting broken text.
+// the output. Structure is preserved by construction, so a miss is a pipeline
+// bug; returning the original beats emitting broken text. A token whose only
+// difference is trailing punctuation width ("8080." vs "8080。") still counts
+// as preserved.
 bool protected_tokens_preserved(const std::string &src, const std::string &out) {
     size_t i = 0;
     const size_t n = src.size();
@@ -394,9 +540,11 @@ bool protected_tokens_preserved(const std::string &src, const std::string &out) 
         }
         if (i == s) break;
         std::string tok = src.substr(s, i - s);
-        if (is_protected_token(tok) && out.find(tok) == std::string::npos) {
-            return false;
-        }
+        if (!is_protected_token(tok)) continue;
+        if (out.find(tok) != std::string::npos) continue;
+        std::string core = strip_edge_punct(tok);
+        if (!core.empty() && out.find(core) != std::string::npos) continue;
+        return false;
     }
     return true;
 }
@@ -597,7 +745,11 @@ void Translator::translate(Provider provider,
                            const std::string &glossary,
                            const std::string &text,
                            Callback cb,
-                           DeltaCallback delta_cb) {
+                           DeltaCallback delta_cb,
+                           std::string *debug_route) {
+    auto set_route = [debug_route](const std::string &r) {
+        if (debug_route) *debug_route = r;
+    };
     std::string key = trim(api_key);
     if (key.empty()) {
         cb({false, "", "请填写 API Key"});
@@ -616,6 +768,7 @@ void Translator::translate(Provider provider,
     const std::string ckey = make_cache_key(provider, target, src, glossary);
     std::string cached;
     if (result_cache().get(ckey, cached)) {
+        set_route("cache");
         cb({true, cached, ""});
         return;
     }
@@ -660,8 +813,9 @@ void Translator::translate(Provider provider,
     if (!has_tech) {
         std::string system_prompt =
             "You are a professional translator. Translate the user's text "
-            "exactly into the requested target language. Always provide a "
-            "translation; never echo or return the original text unchanged. "
+            "exactly into the requested target language, in natural, fluent "
+            "phrasing. Always provide a translation; never echo or return the "
+            "original text unchanged. "
             "Preserve verbatim every non-language token exactly as written: "
             "numbers, percent signs, brackets, file paths, code identifiers, "
             "URLs, and command names. Never reword, reorder, drop, or recompute "
@@ -681,6 +835,7 @@ void Translator::translate(Provider provider,
         constexpr size_t kProseChunkBudget = 1500;
         if (src.size() > kProseChunkBudget) {
             std::vector<Piece> pieces = split_pieces(src, kProseChunkBudget);
+            set_route("prose-chunked(" + std::to_string(pieces.size()) + " pieces)");
             std::string result;
             for (size_t i = 0; i < pieces.size(); ++i) {
                 TranslateRequest req{
@@ -701,6 +856,7 @@ void Translator::translate(Provider provider,
             if (!result.empty()) emit_prose(result);
             return;
         }
+        set_route("prose");
         std::string user_prompt =
             "Translate the following text into " + target_name +
             ". Provide only the translation:\n\n" + src;
@@ -718,80 +874,127 @@ void Translator::translate(Provider provider,
         return;
     }
 
-    // ---- Splice mode (technical tokens present) ----
-    std::vector<std::vector<Seg>> lines;
-    std::vector<std::string> spans = build_lines(src, lines);
-    if (spans.empty()) {
+    // ---- Splice mode v2 (technical tokens present) ----
+    // The unit is a WHOLE line. v1 carved prose tokens out of technical lines
+    // and translated the fragments in isolation; out of context a weak model
+    // either failed them (build logs fell back wholesale — run 2026-09-16 r1,
+    // log1: translated 0/4) or mistranslated ("field" -> "田地"). v2 sends full
+    // lines, instructs the model to keep technical tokens verbatim and in
+    // place, and verifies afterwards: every protected token of a line must
+    // survive in its translation, else that line falls back to the original.
+    // Structure is preserved by one-line-in / one-line-out alignment.
+    std::vector<LineInfo> vlines;
+    {
+        size_t pos = 0;
+        for (;;) {
+            size_t nl = src.find('\n', pos);
+            std::string line = src.substr(
+                pos, nl == std::string::npos ? std::string::npos : nl - pos);
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            LineInfo li;
+            li.text = std::move(line);
+            li.has_prose = line_has_prose(li.text);
+            vlines.push_back(std::move(li));
+            if (nl == std::string::npos) break;
+            pos = nl + 1;
+        }
+    }
+    size_t prose_lines = 0;
+    for (const auto &li : vlines) {
+        if (li.has_prose) ++prose_lines;
+    }
+    if (prose_lines == 0) {
         // Entirely technical (a config, a pure build-log header): nothing to
         // translate — return the source verbatim, structure intact.
+        set_route("splice-verbatim(no prose)");
         wrapped_cb({true, normalize_if_chinese(src, target), ""});
         return;
     }
-    // 二.1: a single prose span beyond the context window is split at sentence
-    // boundaries into pieces; each piece is an independent translation unit and
-    // the pieces are joined back in order so sentence flow is preserved.
+    set_route("splice(started " + std::to_string(prose_lines) + " lines)");
+    // Unique translation units: each prose line becomes one unit (split at
+    // sentence boundaries first when it exceeds the context budget). Weak
+    // models drop or merge repeated lines, which would break count alignment,
+    // so only unique units are sent and each line maps back to its unit(s).
     constexpr size_t kContextBudget = 1500;
-    std::vector<std::string> pieces;           // flattened translation units
-    std::vector<std::vector<int>> span_pieces; // span -> piece indices
-    span_pieces.reserve(spans.size());
-    for (const auto &sp : spans) {
-        if (sp.size() <= kContextBudget) {
-            span_pieces.push_back({static_cast<int>(pieces.size())});
-            pieces.push_back(sp);
+    std::vector<std::string> uniq;                     // unit SENT to the model
+    std::vector<std::string> uniq_orig;                // original unit text
+    std::vector<std::vector<std::string>> uniq_tokens; // placeholder -> token
+    std::vector<char> uniq_masked;                     // 1 = restore on reply
+    std::unordered_map<std::string, size_t> uniq_index;
+    std::vector<std::vector<int>> line_units(vlines.size()); // line -> uniq ids
+    auto add_unit = [&](const std::string &t) {
+        auto it = uniq_index.find(t);
+        if (it == uniq_index.end()) {
+            it = uniq_index.emplace(t, uniq.size()).first;
+            std::string masked;
+            std::vector<std::string> toks;
+            const bool m = mask_unit(t, masked, toks);
+            uniq.push_back(m ? masked : t);
+            uniq_orig.push_back(t);
+            uniq_tokens.push_back(std::move(toks));
+            uniq_masked.push_back(m ? 1 : 0);
+        }
+        return static_cast<int>(it->second);
+    };
+    for (size_t li = 0; li < vlines.size(); ++li) {
+        if (!vlines[li].has_prose) continue;
+        if (vlines[li].text.size() <= kContextBudget) {
+            line_units[li].push_back(add_unit(vlines[li].text));
         } else {
-            std::vector<Piece> ps = split_pieces(sp, kContextBudget);
-            span_pieces.emplace_back();
-            for (const auto &p : ps) {
-                span_pieces.back().push_back(static_cast<int>(pieces.size()));
-                pieces.push_back(p.text);
+            for (const auto &p : split_pieces(vlines[li].text, kContextBudget)) {
+                line_units[li].push_back(add_unit(p.text));
             }
         }
     }
-    // Deduplicate the pieces: weak models drop or merge repeated lines, which
-    // would break count alignment, so send only the unique prose and map each
-    // piece back to its unique block line when splicing.
-    std::vector<std::string> uniq;
-    std::unordered_map<std::string, size_t> uniq_index;
-    for (const auto &pc : pieces) {
-        if (uniq_index.find(pc) == uniq_index.end()) {
-            uniq_index[pc] = uniq.size();
-            uniq.push_back(pc);
-        }
-    }
     std::string system_prompt =
-        "You are a professional translator. The user's text contains one prose "
-        "fragment per line. Translate each fragment into the requested target "
-        "language. Output exactly one line of translation per input line, in "
-        "the same order, without numbering, quotation marks, or any added "
-        "explanation. Never merge, split, reorder, or omit lines; output only "
-        "the translations. " +
-        constraints;
+        "You are a professional translator for software developers. The user's "
+        "text contains log, terminal, or documentation lines. Numbered "
+        "placeholders like [[1]] stand in for technical tokens (file paths, "
+        "code identifiers, commands, flags, numbers, timestamps, error codes): "
+        "copy every placeholder EXACTLY as written, in the position where its "
+        "content belongs, and translate only the natural-language parts into "
+        "the requested target language. Output exactly one translated line per "
+        "input line, in the same order. Never merge, split, reorder, or omit "
+        "lines; never translate, renumber, or drop placeholders; output only "
+        "the translations, without numbering or added explanation.";
+    // Worked examples in the SAME masked form the model actually sees —
+    // small models (GLM-4-Flash / Qwen-7B) follow examples far better than
+    // abstract rules.
+    if (target == Target::Chinese) {
+        system_prompt +=
+            " Example — input line: \"[[1]] cannot open [[2]] Permission "
+            "denied\"; output line: \"[[1]] 无法打开 [[2]] 权限被拒绝\". "
+            "Another example — input line: \"[[1]] Cannot read properties of "
+            "undefined [[2]] 'map')\"; output line: \"[[1]] 无法读取未定义的"
+            "属性 [[2]] 'map')\".";
+    }
+    system_prompt += " " + constraints;
     // The glossary is added per group (see below) so only terms actually
-    // present in a group's fragments are injected — an absent term would send
-    // a weak model looking for it in every line and corrupt unrelated ones.
+    // present in a group's lines are injected — an absent term would send a
+    // weak model looking for it in every line and corrupt unrelated ones.
 
-    // Translate the unique pieces in small groups, in parallel. The model
-    // occasionally drops or merges a line (short trailing fragments are the
-    // usual victim); a single all-or-nothing request would then fall the whole
-    // document back untranslated, so a dropped line in one group only costs
-    // that group's prose — the rest is still spliced. Structure is always
-    // preserved. Each worker does its own blocking HTTP call and writes only
-    // its own result slot, so no locks are needed beyond joining the threads.
-    constexpr size_t kSpanGroupSize = 5;
-    const size_t nGroups = (uniq.size() + kSpanGroupSize - 1) / kSpanGroupSize;
-    std::vector<std::string> uniq_translations = uniq; // default: original text
+    // Translate the unique lines in small groups, in parallel. A dropped or
+    // merged line in one group only costs that group — the rest still
+    // translates; each failed line keeps its original text. Each worker does
+    // its own blocking HTTP call and writes only its own result slot, so no
+    // locks are needed beyond joining the threads.
+    constexpr size_t kLineGroupSize = 5;
+    const size_t nGroups = (uniq.size() + kLineGroupSize - 1) / kLineGroupSize;
+    std::vector<std::string> uniq_translations = uniq_orig; // default: original
     std::vector<char> uniq_translated(uniq.size(), 0);
     {
         std::vector<Result> group_results(nGroups);
         std::vector<std::vector<std::string>> group_lines(nGroups);
+        std::vector<std::string> group_blocks(nGroups);
         std::vector<std::thread> workers;
         workers.reserve(nGroups);
         ITranslator *adapter_ptr = adapter.get();
         for (size_t gi = 0; gi < nGroups; ++gi) {
-            const size_t g = gi * kSpanGroupSize;
-            const size_t gEnd = std::min(g + kSpanGroupSize, uniq.size());
+            const size_t g = gi * kLineGroupSize;
+            const size_t gEnd = std::min(g + kLineGroupSize, uniq.size());
             std::string block;
             for (size_t k = g; k < gEnd; ++k) block += uniq[k] + "\n";
+            group_blocks[gi] = block;
             TranslateRequest req{key,
                                  system_prompt + build_glossary(glossary, block),
                                  "Translate each line into " + target_name +
@@ -807,14 +1010,30 @@ void Translator::translate(Provider provider,
         }
         for (auto &w : workers) w.join();
 
+        // Quality triage (TRANSLATE_DEBUG=1): dump each group's request block
+        // and raw reply to stderr so a failing group can be diagnosed offline.
+        const bool trace = std::getenv("TRANSLATE_DEBUG") != nullptr;
+
+        std::string first_error; // surfaced only when EVERY group failed
+        size_t ok_groups = 0;
         for (size_t gi = 0; gi < nGroups; ++gi) {
             Result &rr = group_results[gi];
-            if (!rr.ok) {
-                wrapped_cb(rr);
-                return;
+            if (trace) {
+                std::fprintf(stderr,
+                             "[splice] group %zu/%zu ok=%d\n--- block ---\n%s"
+                             "--- reply ---\n%s--- end ---\n",
+                             gi + 1, nGroups, rr.ok ? 1 : 0,
+                             group_blocks[gi].c_str(),
+                             rr.ok ? rr.text.c_str() : rr.error.c_str());
             }
-            const size_t g = gi * kSpanGroupSize;
-            const size_t gEnd = std::min(g + kSpanGroupSize, uniq.size());
+            if (!rr.ok) {
+                if (first_error.empty()) first_error = rr.error;
+                continue; // a failed group degrades to original lines, not the
+                          // whole document (v1 returned the error wholesale)
+            }
+            ++ok_groups;
+            const size_t g = gi * kLineGroupSize;
+            const size_t gEnd = std::min(g + kLineGroupSize, uniq.size());
             // Align the reply to this group by line count; drop empty lines so
             // a leading/trailing blank line does not break alignment.
             std::vector<std::string> &tr = group_lines[gi];
@@ -823,41 +1042,125 @@ void Translator::translate(Provider provider,
                      tr.end());
             if (tr.size() != gEnd - g) continue; // group stays as the original
             for (size_t k = g; k < gEnd; ++k) {
-                std::string candidate = tr[k - g];
-                if (!is_bad_translation(candidate)) {
+                std::string candidate;
+                bool ok_line;
+                if (uniq_masked[k]) {
+                    // Masked unit: restore [[N]] placeholders verbatim; any
+                    // missing/malformed placeholder fails the whole line.
+                    ok_line = restore_unit(tr[k - g], uniq_tokens[k], candidate);
+                    if (ok_line) {
+                        candidate = repunct(candidate, uniq_orig[k]);
+                        ok_line = !is_bad_translation(candidate);
+                    }
+                    if (trace) {
+                        std::fprintf(stderr,
+                                     "[splice] line %zu %s masked <<<%s>>>\n",
+                                     k, ok_line ? "ACCEPT" : "REJECT",
+                                     ok_line ? candidate.c_str()
+                                             : tr[k - g].c_str());
+                    }
+                } else {
+                    // Unmasked unit (no protected tokens): punctuation
+                    // normalization + quality guard + verbatim check.
+                    candidate = repunct(tr[k - g], uniq[k]);
+                    bool bad = is_bad_translation(candidate);
+                    bool kept =
+                        protected_tokens_preserved(uniq_orig[k], candidate);
+                    ok_line = !bad && kept;
+                    if (trace) {
+                        if (kept) {
+                            std::fprintf(stderr,
+                                         "[splice] line %zu %s bad=%d <<<%s>>>\n",
+                                         k, ok_line ? "ACCEPT" : "REJECT",
+                                         bad ? 1 : 0, candidate.c_str());
+                        } else {
+                            // locate the first missing token for offline triage
+                            std::string miss;
+                            size_t p = 0;
+                            const std::string &line = uniq_orig[k];
+                            while (p < line.size()) {
+                                while (p < line.size() &&
+                                       (line[p] == ' ' || line[p] == '\t' ||
+                                        line[p] == '\r'))
+                                    ++p;
+                                size_t s0 = p;
+                                while (p < line.size() && line[p] != ' ' &&
+                                       line[p] != '\t' && line[p] != '\r' &&
+                                       line[p] != '\n')
+                                    ++p;
+                                if (p == s0) break;
+                                std::string tok = line.substr(s0, p - s0);
+                                if (!is_protected_token(tok)) continue;
+                                if (candidate.find(tok) != std::string::npos)
+                                    continue;
+                                std::string core = strip_edge_punct(tok);
+                                if (!core.empty() &&
+                                    candidate.find(core) != std::string::npos)
+                                    continue;
+                                miss = tok;
+                                break;
+                            }
+                            std::fprintf(stderr,
+                                         "[splice] line %zu REJECT token-miss "
+                                         "<<<%s>>> in <<<%s>>>\n", k,
+                                         miss.c_str(), candidate.c_str());
+                        }
+                    }
+                }
+                if (ok_line) {
                     uniq_translations[k] = candidate;
                     uniq_translated[k] = 1;
                 }
             }
         }
+        if (ok_groups == 0 && !first_error.empty()) {
+            wrapped_cb({false, "", first_error});
+            return;
+        }
     }
-    // 置信度评分 (设计五): when the model actually translated too few of the
-    // unique pieces, the output would be mostly untranslated English — return
-    // the original instead (conservative mode). Structure is never degraded.
+    // 置信度评分 (设计五): below 20% translated the model clearly failed
+    // system-wide (degraded API / auth scope) — return the original. In
+    // between, assemble per line: every translated line is verified, the rest
+    // keep their original text. For log/error triage a mixed result beats a
+    // wall of untranslated English (run r4: err1 fell back wholesale at 1/3).
     size_t translated_count =
         static_cast<size_t>(std::count(uniq_translated.begin(), uniq_translated.end(), 1));
     const double rate =
         uniq.empty() ? 0.0 : static_cast<double>(translated_count) / uniq.size();
-    if (rate < 0.5) {
+    if (rate < 0.2) {
+        set_route("splice-fallback(translated " + std::to_string(translated_count) +
+                  "/" + std::to_string(uniq.size()) + ", rate=" +
+                  std::to_string(static_cast<int>(rate * 100)) + "%)");
         wrapped_cb({true, normalize_if_chinese(src, target), ""});
         return;
     }
-    // Map each span to its pieces' translations joined in order; untranslated
-    // pieces keep the original text (already in uniq_translations).
-    std::vector<std::string> translations(spans.size());
-    for (size_t i = 0; i < spans.size(); ++i) {
-        std::string joined;
-        for (const int pc : span_pieces[i]) {
-            const std::string &t = uniq_translations[uniq_index.at(pieces[pc])];
-            if (!joined.empty()) joined += " ";
-            joined += t;
+    set_route(rate < 0.5
+                  ? "splice(partial translated " + std::to_string(translated_count) +
+                        "/" + std::to_string(uniq.size()) + ")"
+                  : "splice(translated " + std::to_string(translated_count) + "/" +
+                        std::to_string(uniq.size()) + ")");
+    // Reassemble: technical-only lines verbatim, prose lines from their unit
+    // translations (untranslated units already hold the original text).
+    std::string out;
+    for (size_t li = 0; li < vlines.size(); ++li) {
+        if (!vlines[li].has_prose) {
+            out += vlines[li].text;
+        } else {
+            std::string joined;
+            for (const int u : line_units[li]) {
+                if (!joined.empty()) joined += " ";
+                joined += uniq_translations[static_cast<size_t>(u)];
+            }
+            out += joined;
         }
-        translations[i] = joined;
+        if (li + 1 < vlines.size()) out += '\n';
     }
-    std::string out = reassemble(lines, spans, translations);
     if (filter.repunct) out = repunct(out, src);
     // Safety net: every technical token must still be present verbatim.
     if (!protected_tokens_preserved(src, out)) {
+        set_route("splice-fallback(token-miss, translated " +
+                  std::to_string(translated_count) + "/" +
+                  std::to_string(uniq.size()) + ")");
         wrapped_cb({true, normalize_if_chinese(src, target), ""});
         return;
     }

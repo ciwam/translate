@@ -29,14 +29,21 @@ public:
        far (always a valid UTF-8 prefix of the final result — never split
        mid-character) so the caller can render progressively. `glossary` is a
        user-defined terminology dictionary ("term = translation" per line); it
-       is injected into the prompt to force consistent terminology. */
+       is injected into the prompt to force consistent terminology.
+
+       `debug_route` (optional, may be null) receives a one-line diagnostic
+       describing which pipeline path served the request and its counters —
+       "cache", "prose", "prose-chunked(3)", "splice(translated 8/9)",
+       "splice-fallback(rate=22%)", "splice-fallback(token-miss)" — for the
+       debug CLI / quality triage. Never written when null. */
     void translate(Provider provider,
                    Target target,
                    const std::string &api_key,
                    const std::string &glossary,
                    const std::string &text,
                    Callback cb,
-                   DeltaCallback delta_cb = nullptr);
+                   DeltaCallback delta_cb = nullptr,
+                   std::string *debug_route = nullptr);
 };
 
 } // namespace translate
