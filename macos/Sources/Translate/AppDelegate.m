@@ -91,6 +91,22 @@
     editItem.submenu = edit;
     [main addItem:editItem];
 
+    // Window menu: routes Cmd+M to performMiniaturize: (the window is created
+    // with NSWindowStyleMaskMiniaturizable; without this item the shortcut has
+    // no responder chain target).
+    NSMenu *window = [[NSMenu alloc] initWithTitle:@"窗口"];
+    [window addItemWithTitle:@"最小化"
+                      action:@selector(performMiniaturize:)
+               keyEquivalent:@"m"];
+    [window addItemWithTitle:@"缩放"
+                      action:@selector(performZoom:)
+               keyEquivalent:@""];
+    NSMenuItem *windowItem = [[NSMenuItem alloc] initWithTitle:@"窗口"
+                                                        action:nil
+                                                 keyEquivalent:@""];
+    windowItem.submenu = window;
+    [main addItem:windowItem];
+
     [NSApp setMainMenu:main];
 }
 
