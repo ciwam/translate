@@ -40,6 +40,17 @@ std::string trim(const std::string &s) {
     return s.substr(b, e - b + 1);
 }
 
+// Rate-limit / throttling faults are transient: the retry layer re-sends with
+// backoff. Auth and other provider faults are not retried. Matched against the
+// HTTP status and the provider message (message wording differs per provider).
+bool is_throttle(long http_status, const std::string &msg) {
+    if (http_status == 429) return true;
+    for (const char *kw : {"429", "限流", "频繁", "rate", "throttl"}) {
+        if (msg.find(kw) != std::string::npos) return true;
+    }
+    return false;
+}
+
 // Length of the longest prefix of `s` that ends on a UTF-8 code-point boundary.
 // A code point spans at most 4 bytes, so at most 3 trailing bytes can be an
 // incomplete tail. Used so progressive deltas never carry a partial character
@@ -75,6 +86,7 @@ public:
              {{{"role", "system"}, {"content", req.system_prompt}},
               {{"role", "user"}, {"content", req.user_prompt}}}},
             {"temperature", 0.1},
+            {"max_tokens", 4095},
             {"stream", true}};
 
         long src_kb = static_cast<long>(req.user_prompt.size() / 1024) + 1;
@@ -134,7 +146,13 @@ public:
                     delta(result.substr(0, vp));
                 }
             }
-            if (choice.contains("finish_reason") && !choice["finish_reason"].is_null()) {
+            if (choice.contains("finish_reason") &&
+                choice["finish_reason"].is_string()) {
+                // A truncated reply ("length") must fail loudly: silently
+                // keeping the partial text drops lines and breaks alignment.
+                if (choice["finish_reason"].get<std::string>() == "length") {
+                    stream_err = "输出被截断（finish_reason=length）";
+                }
                 stream_done = true; // final chunk; "[DONE]" may not follow
             }
         };
@@ -146,12 +164,16 @@ public:
             return;
         }
         if (!stream_err.empty()) {
-            done({false, "", "API 错误：" + stream_err});
+            const char *prefix = is_throttle(http_status, stream_err)
+                                     ? "API 限流：" : "API 错误：";
+            done({false, "", prefix + stream_err});
             return;
         }
         if (trim(result).empty()) {
+            const bool throttle = is_throttle(http_status, result);
             std::string msg = http_status >= 400
-                ? "API 错误：HTTP " + std::to_string(http_status)
+                ? std::string(throttle ? "API 限流：HTTP " : "API 错误：HTTP ") +
+                      std::to_string(http_status)
                 : "响应异常：未收到内容（HTTP " +
                   std::to_string(http_status) + "）";
             done({false, "", msg});

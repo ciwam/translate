@@ -38,10 +38,9 @@ PROVIDERS = ["zhipu", "siliconflow"]
 ROUTE_DOC = (
     "route 字段说明翻译内核走的管线："
     "cache=命中本地缓存；prose=纯文本直译；prose-chunked(N)=长文本按句切 N 段顺序翻译；"
-    "splice(translated a/b)=技术行拼接管线，b 行中 a 行被模型翻译且通过校验；"
-    "splice(partial translated a/b)=部分行翻译成功（其余行保留原文）；"
-    "splice-fallback(...)=保守回退（几乎无行通过校验或技术词丢失时原文返回）；"
-    "splice-verbatim=纯技术内容无需翻译。"
+    "splice(translated a/b)=技术行拼接管线，b 行全部被模型翻译且通过校验（a 恒等于 b，"
+    "否则整体报错）；splice(incomplete translated a/b)=部分行多次重试仍失败，"
+    "整体报错不返回混排结果；splice-verbatim=纯技术内容无需翻译。"
 )
 
 TRANSLATE_TOOL = {

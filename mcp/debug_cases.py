@@ -103,6 +103,53 @@ CASES = [
             ),
         },
     },
+    {
+        "id": "log3",
+        "desc": "Flutter 构建警告日志（KGP 迁移警告，长 URL/插件列表/相似行/缩进块）",
+        "args": {
+            "target": "zh",
+            "text": (
+                "WARNING: Your Android app project: app located at: "
+                "/Users/wangs/dev/code/phos/android/app/build.gradle.kts\n"
+                "applies the Kotlin Gradle Plugin, which will cause build failures "
+                "in future versions of Flutter.\n"
+                "Please migrate your app to Built-in Kotlin using this guide: "
+                "https://docs.flutter.dev/release/breaking-changes/"
+                "migrate-to-built-in-kotlin/for-app-developers\n"
+                "\n"
+                "WARNING: Your app uses the following plugins that apply Kotlin "
+                "Gradle Plugin (KGP): dynamic_color, file_picker, "
+                "flutter_image_compress_common, package_info_plus, photo_manager, "
+                "wakelock_plus\n"
+                "Future versions of Flutter will fail to build if your app uses "
+                "plugins that apply KGP.\n"
+                "\n"
+                "Please check the changelogs of these plugins and upgrade to a "
+                "version that supports Built-in Kotlin.\n"
+                "If no such version exists, report the issue to the plugin. If "
+                "necessary, here is a guide on filing\n"
+                "an issue against a plugin: https://docs.flutter.dev/release/"
+                "breaking-changes/migrate-to-built-in-kotlin/for-app-developers"
+                "#report-incompatible-kotlin-gradle-plugin-usage-to-plugin-authors\n"
+                "\n"
+                "If you are a plugin author, please migrate your plugin to "
+                "Built-in Kotlin using this guide: https://docs.flutter.dev/"
+                "release/breaking-changes/migrate-to-built-in-kotlin/"
+                "for-plugin-authors\n"
+                "Font asset \"CupertinoIcons.ttf\" was tree-shaken, reducing it "
+                "from 257628 to 1420 bytes (99.4% reduction). Tree-shaking can be "
+                "disabled by providing the --no-tree-shake-icons flag when "
+                "building your app.\n"
+                "Font asset \"MaterialIcons-Regular.otf\" was tree-shaken, "
+                "reducing it from 1645184 to 9392 bytes (99.4% reduction). "
+                "Tree-shaking can be disabled by providing the "
+                "--no-tree-shake-icons flag when building your app.\n"
+                "Warning: The generated ELF library contains unobfuscated DWARF "
+                "debugging information.\n"
+                "         To avoid this, use --strip to remove it."
+            ),
+        },
+    },
 ]
 
 

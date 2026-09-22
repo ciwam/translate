@@ -33,8 +33,10 @@ public:
 
        `debug_route` (optional, may be null) receives a one-line diagnostic
        describing which pipeline path served the request and its counters —
-       "cache", "prose", "prose-chunked(3)", "splice(translated 8/9)",
-       "splice-fallback(rate=22%)", "splice-fallback(token-miss)" — for the
+       "cache", "prose", "prose-chunked(3)", "splice(translated 8/8)",
+       "splice(incomplete translated 5/8)" (untranslated lines survived
+       group attempts + per-line rescue; the call fails with an error
+       instead of returning mixed output), "splice-verbatim" — for the
        debug CLI / quality triage. Never written when null. */
     void translate(Provider provider,
                    Target target,

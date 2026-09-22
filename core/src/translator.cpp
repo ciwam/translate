@@ -4,6 +4,8 @@
 #include "normalize_icu.hpp"
 
 #include <algorithm>
+#include <chrono>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -558,9 +560,13 @@ bool is_bad_translation(const std::string &text) {
     if (s.empty()) return true;
     const size_t n = s.size();
     // Prompt echo: markers that would never appear inside a translation.
+    // Must match every user-prompt wording the kernel sends ("Translate each
+    // of the following N lines...", "Translate the following single line...",
+    // and the prose path's "Translate the following text...").
     if (s.find("翻译以下内容") != std::string::npos ||
         s.find("禁止使用繁体字") != std::string::npos ||
         s.find("Translate each line") != std::string::npos ||
+        s.find("Translate the following") != std::string::npos ||
         s.find("please translate") != std::string::npos) {
         return true;
     }
@@ -651,15 +657,25 @@ std::string build_glossary(const std::string &glossary, const std::string &conte
 // from every attempt (the UI overwrites with the running result, so a retry
 // just restarts the overwrite). The first ok result is delivered; if every
 // attempt fails, the last error is delivered. `done` is called exactly once.
+// "API 限流" errors (429 / rate-limit wording) are transient and retried with
+// exponential backoff; auth and other provider faults ("API 错误") are not.
 void translate_with_retry(ITranslator &adapter, const TranslateRequest &req,
                           DeltaCallback delta, Callback done) {
     constexpr int kMaxAttempts = 3;
     bool delivered = false;
     for (int attempt = 0; attempt < kMaxAttempts && !delivered; ++attempt) {
+        if (attempt > 0) {
+            const int backoff_ms = 400 << (attempt - 1);
+            const int jitter = std::rand() % 250;
+            std::this_thread::sleep_for(
+                std::chrono::milliseconds(backoff_ms + jitter));
+        }
         Result r;
         adapter.translate(req, delta, [&](const Result &res) { r = res; });
-        bool retryable = !r.ok && r.error.find("API 错误") == std::string::npos &&
-                         attempt < kMaxAttempts - 1;
+        const bool throttle = r.error.find("API 限流") != std::string::npos;
+        const bool hard_error = r.error.find("API 错误") != std::string::npos;
+        const bool retryable = !r.ok && (throttle || !hard_error) &&
+                               attempt < kMaxAttempts - 1;
         delivered = r.ok || !retryable;
         if (delivered) done(r);
     }
@@ -954,9 +970,12 @@ void Translator::translate(Provider provider,
         "copy every placeholder EXACTLY as written, in the position where its "
         "content belongs, and translate only the natural-language parts into "
         "the requested target language. Output exactly one translated line per "
-        "input line, in the same order. Never merge, split, reorder, or omit "
-        "lines; never translate, renumber, or drop placeholders; output only "
-        "the translations, without numbering or added explanation.";
+        "input line, in the same order. Your reply MUST contain exactly the "
+        "same number of lines as the input: never merge two input lines into "
+        "one, never split one input line across two output lines, never reflow "
+        "or wrap a long line, never add or drop a line break. Never translate, "
+        "renumber, or drop placeholders; output only the translations, without "
+        "numbering or added explanation.";
     // Worked examples in the SAME masked form the model actually sees —
     // small models (GLM-4-Flash / Qwen-7B) follow examples far better than
     // abstract rules.
@@ -973,12 +992,15 @@ void Translator::translate(Provider provider,
     // present in a group's lines are injected — an absent term would send a
     // weak model looking for it in every line and corrupt unrelated ones.
 
-    // Translate the unique lines in small groups, in parallel. A dropped or
-    // merged line in one group only costs that group — the rest still
-    // translates; each failed line keeps its original text. Each worker does
-    // its own blocking HTTP call and writes only its own result slot, so no
-    // locks are needed beyond joining the threads.
+    // Translate the unique lines in small groups, with bounded parallelism (a
+    // simultaneous burst invites provider rate limits, which would then need
+    // retries and stall the whole batch). A dropped or merged line in one
+    // group only costs that group — the rest still translates; each failed
+    // line keeps its original text and goes through per-line rescue below.
+    // Each worker does its own blocking HTTP call and writes only its own
+    // result slot, so no locks are needed beyond joining the threads.
     constexpr size_t kLineGroupSize = 5;
+    constexpr size_t kMaxConcurrent = 3;
     const size_t nGroups = (uniq.size() + kLineGroupSize - 1) / kLineGroupSize;
     std::vector<std::string> uniq_translations = uniq_orig; // default: original
     std::vector<char> uniq_translated(uniq.size(), 0);
@@ -989,21 +1011,45 @@ void Translator::translate(Provider provider,
         std::vector<std::thread> workers;
         workers.reserve(nGroups);
         ITranslator *adapter_ptr = adapter.get();
+        // Minimal counting semaphore (C++17: no std::counting_semaphore).
+        struct Semaphore {
+            explicit Semaphore(size_t n) : count(n) {}
+            std::mutex mu;
+            std::condition_variable cv;
+            size_t count;
+            void acquire() {
+                std::unique_lock<std::mutex> lk(mu);
+                cv.wait(lk, [this] { return count > 0; });
+                --count;
+            }
+            void release() {
+                {
+                    std::lock_guard<std::mutex> lk(mu);
+                    ++count;
+                }
+                cv.notify_one();
+            }
+        } sem(kMaxConcurrent);
         for (size_t gi = 0; gi < nGroups; ++gi) {
             const size_t g = gi * kLineGroupSize;
             const size_t gEnd = std::min(g + kLineGroupSize, uniq.size());
             std::string block;
             for (size_t k = g; k < gEnd; ++k) block += uniq[k] + "\n";
             group_blocks[gi] = block;
+            const size_t group_n = gEnd - g;
             TranslateRequest req{key,
                                  system_prompt + build_glossary(glossary, block),
-                                 "Translate each line into " + target_name +
+                                 "Translate each of the following " +
+                                     std::to_string(group_n) +
+                                     " lines into " + target_name +
                                      ":\n\n" + block};
             workers.emplace_back([adapter_ptr, req = std::move(req), &group_results,
-                                  &group_lines, gi]() {
+                                  &group_lines, gi, &sem]() {
+                sem.acquire();
                 Result rr;
                 translate_with_retry(*adapter_ptr, req, nullptr,
                                      [&](const Result &r) { rr = r; });
+                sem.release();
                 group_results[gi] = rr;
                 if (rr.ok) group_lines[gi] = split_lines(rr.text);
             });
@@ -1013,6 +1059,146 @@ void Translator::translate(Provider provider,
         // Quality triage (TRANSLATE_DEBUG=1): dump each group's request block
         // and raw reply to stderr so a failing group can be diagnosed offline.
         const bool trace = std::getenv("TRANSLATE_DEBUG") != nullptr;
+
+        // Per-line validation shared by group triage and the rescue phase:
+        // placeholder restore / punctuation normalization / quality guards /
+        // token preservation — plus two rejections the older guards missed,
+        // which let untranslated English pass every check and surface as
+        // half-English output: the reply echoing the source line, and a CJK
+        // target whose reply contains no CJK character at all.
+        const bool want_cjk = target == Target::Chinese ||
+                              target == Target::Japanese ||
+                              target == Target::Korean;
+        auto has_cjk = [](const std::string &s) {
+            size_t i = 0;
+            while (i < s.size()) {
+                unsigned char c = static_cast<unsigned char>(s[i]);
+                uint32_t cp;
+                size_t len;
+                if (c < 0x80) { cp = c; len = 1; }
+                else if ((c & 0xE0) == 0xC0 && i + 1 < s.size()) {
+                    cp = ((c & 0x1Fu) << 6) | (s[i + 1] & 0x3Fu); len = 2;
+                } else if ((c & 0xF0) == 0xE0 && i + 2 < s.size()) {
+                    cp = ((c & 0x0Fu) << 12) | ((s[i + 1] & 0x3Fu) << 6) |
+                         (s[i + 2] & 0x3Fu);
+                    len = 3;
+                } else if ((c & 0xF8) == 0xF0 && i + 3 < s.size()) {
+                    cp = ((c & 0x07u) << 18) | ((s[i + 1] & 0x3Fu) << 12) |
+                         ((s[i + 2] & 0x3Fu) << 6) | (s[i + 3] & 0x3Fu);
+                    len = 4;
+                } else { cp = 0xFFFD; len = 1; }
+                i += len;
+                if ((cp >= 0x4E00 && cp <= 0x9FFF) ||
+                    (cp >= 0x3400 && cp <= 0x4DBF) ||
+                    (cp >= 0x3040 && cp <= 0x30FF) ||
+                    (cp >= 0xAC00 && cp <= 0xD7AF)) {
+                    return true;
+                }
+            }
+            return false;
+        };
+        auto validate_line = [&](size_t k, const std::string &reply_line,
+                                 std::string &out) -> bool {
+            const std::string &orig = uniq_orig[k];
+            const std::string rt = trim(reply_line);
+            if (rt.empty() || rt == trim(orig)) {
+                // Echo of the source = untranslated — except a line already
+                // written in the target language legitimately passes through
+                // unchanged (mixed-language input, or an English target fed
+                // English text): then the echo IS the correct translation.
+                bool already_target =
+                    (want_cjk && has_cjk(orig)) ||
+                    (target == Target::English &&
+                     orig.find_first_not_of(
+                         " \t\r\n!\"#$%&'()*+,-./0123456789:;<=>?@"
+                         "ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`"
+                         "abcdefghijklmnopqrstuvwxyz{|}~") ==
+                         std::string::npos);
+                if (!rt.empty() && already_target) {
+                    out = orig;
+                    return true;
+                }
+                if (trace) {
+                    std::fprintf(stderr,
+                                 "[splice] line %zu REJECT echo <<<%s>>>\n",
+                                 k, rt.c_str());
+                }
+                return false;
+            }
+            std::string candidate;
+            bool ok_line;
+            if (uniq_masked[k]) {
+                // Masked unit: restore [[N]] placeholders verbatim; any
+                // missing/malformed placeholder fails the whole line.
+                ok_line = restore_unit(reply_line, uniq_tokens[k], candidate);
+                if (ok_line) {
+                    candidate = repunct(candidate, orig);
+                    ok_line = !is_bad_translation(candidate);
+                }
+                if (trace) {
+                    std::fprintf(stderr,
+                                 "[splice] line %zu %s masked <<<%s>>>\n",
+                                 k, ok_line ? "ACCEPT" : "REJECT",
+                                 ok_line ? candidate.c_str() : rt.c_str());
+                }
+            } else {
+                // Unmasked unit (no protected tokens): punctuation
+                // normalization + quality guard + verbatim check.
+                candidate = repunct(reply_line, uniq[k]);
+                bool bad = is_bad_translation(candidate);
+                bool kept = protected_tokens_preserved(orig, candidate);
+                ok_line = !bad && kept;
+                if (trace) {
+                    if (kept) {
+                        std::fprintf(stderr,
+                                     "[splice] line %zu %s bad=%d <<<%s>>>\n",
+                                     k, ok_line ? "ACCEPT" : "REJECT",
+                                     bad ? 1 : 0, candidate.c_str());
+                    } else {
+                        // locate the first missing token for offline triage
+                        std::string miss;
+                        size_t p = 0;
+                        const std::string &line = orig;
+                        while (p < line.size()) {
+                            while (p < line.size() &&
+                                   (line[p] == ' ' || line[p] == '\t' ||
+                                    line[p] == '\r'))
+                                ++p;
+                            size_t s0 = p;
+                            while (p < line.size() && line[p] != ' ' &&
+                                   line[p] != '\t' && line[p] != '\r' &&
+                                   line[p] != '\n')
+                                ++p;
+                            if (p == s0) break;
+                            std::string tok = line.substr(s0, p - s0);
+                            if (!is_protected_token(tok)) continue;
+                            if (candidate.find(tok) != std::string::npos)
+                                continue;
+                            std::string core = strip_edge_punct(tok);
+                            if (!core.empty() &&
+                                candidate.find(core) != std::string::npos)
+                                continue;
+                            miss = tok;
+                            break;
+                        }
+                        std::fprintf(stderr,
+                                     "[splice] line %zu REJECT token-miss "
+                                     "<<<%s>>> in <<<%s>>>\n", k,
+                                     miss.c_str(), candidate.c_str());
+                    }
+                }
+            }
+            if (ok_line && want_cjk && !has_cjk(candidate)) {
+                ok_line = false;
+                if (trace) {
+                    std::fprintf(stderr,
+                                 "[splice] line %zu REJECT no-cjk <<<%s>>>\n",
+                                 k, candidate.c_str());
+                }
+            }
+            if (ok_line) out = candidate;
+            return ok_line;
+        };
 
         std::string first_error; // surfaced only when EVERY group failed
         size_t ok_groups = 0;
@@ -1028,86 +1214,24 @@ void Translator::translate(Provider provider,
             }
             if (!rr.ok) {
                 if (first_error.empty()) first_error = rr.error;
-                continue; // a failed group degrades to original lines, not the
-                          // whole document (v1 returned the error wholesale)
+                continue; // a failed group's lines go through rescue below
             }
             ++ok_groups;
             const size_t g = gi * kLineGroupSize;
             const size_t gEnd = std::min(g + kLineGroupSize, uniq.size());
             // Align the reply to this group by line count; drop empty lines so
-            // a leading/trailing blank line does not break alignment.
+            // a leading/trailing blank line does not break alignment. A count
+            // mismatch (merged/split/wrapped lines) fails the whole group —
+            // guessing an alignment could translate the wrong line — and the
+            // group's units fall through to the per-line rescue below.
             std::vector<std::string> &tr = group_lines[gi];
             tr.erase(std::remove_if(tr.begin(), tr.end(),
                                     [](const std::string &l) { return trim(l).empty(); }),
                      tr.end());
-            if (tr.size() != gEnd - g) continue; // group stays as the original
+            if (tr.size() != gEnd - g) continue;
             for (size_t k = g; k < gEnd; ++k) {
                 std::string candidate;
-                bool ok_line;
-                if (uniq_masked[k]) {
-                    // Masked unit: restore [[N]] placeholders verbatim; any
-                    // missing/malformed placeholder fails the whole line.
-                    ok_line = restore_unit(tr[k - g], uniq_tokens[k], candidate);
-                    if (ok_line) {
-                        candidate = repunct(candidate, uniq_orig[k]);
-                        ok_line = !is_bad_translation(candidate);
-                    }
-                    if (trace) {
-                        std::fprintf(stderr,
-                                     "[splice] line %zu %s masked <<<%s>>>\n",
-                                     k, ok_line ? "ACCEPT" : "REJECT",
-                                     ok_line ? candidate.c_str()
-                                             : tr[k - g].c_str());
-                    }
-                } else {
-                    // Unmasked unit (no protected tokens): punctuation
-                    // normalization + quality guard + verbatim check.
-                    candidate = repunct(tr[k - g], uniq[k]);
-                    bool bad = is_bad_translation(candidate);
-                    bool kept =
-                        protected_tokens_preserved(uniq_orig[k], candidate);
-                    ok_line = !bad && kept;
-                    if (trace) {
-                        if (kept) {
-                            std::fprintf(stderr,
-                                         "[splice] line %zu %s bad=%d <<<%s>>>\n",
-                                         k, ok_line ? "ACCEPT" : "REJECT",
-                                         bad ? 1 : 0, candidate.c_str());
-                        } else {
-                            // locate the first missing token for offline triage
-                            std::string miss;
-                            size_t p = 0;
-                            const std::string &line = uniq_orig[k];
-                            while (p < line.size()) {
-                                while (p < line.size() &&
-                                       (line[p] == ' ' || line[p] == '\t' ||
-                                        line[p] == '\r'))
-                                    ++p;
-                                size_t s0 = p;
-                                while (p < line.size() && line[p] != ' ' &&
-                                       line[p] != '\t' && line[p] != '\r' &&
-                                       line[p] != '\n')
-                                    ++p;
-                                if (p == s0) break;
-                                std::string tok = line.substr(s0, p - s0);
-                                if (!is_protected_token(tok)) continue;
-                                if (candidate.find(tok) != std::string::npos)
-                                    continue;
-                                std::string core = strip_edge_punct(tok);
-                                if (!core.empty() &&
-                                    candidate.find(core) != std::string::npos)
-                                    continue;
-                                miss = tok;
-                                break;
-                            }
-                            std::fprintf(stderr,
-                                         "[splice] line %zu REJECT token-miss "
-                                         "<<<%s>>> in <<<%s>>>\n", k,
-                                         miss.c_str(), candidate.c_str());
-                        }
-                    }
-                }
-                if (ok_line) {
+                if (validate_line(k, tr[k - g], candidate)) {
                     uniq_translations[k] = candidate;
                     uniq_translated[k] = 1;
                 }
@@ -1117,28 +1241,66 @@ void Translator::translate(Provider provider,
             wrapped_cb({false, "", first_error});
             return;
         }
+
+        // Rescue: every unit still untranslated — its group failed at the
+        // HTTP level, the reply misaligned with the group's line count, or
+        // the line was rejected by validation — is retried as an individual
+        // single-line request. One line per request cannot be merged with
+        // neighbours or dropped, so alignment is trivial; a reply wrapped
+        // across several lines is rejoined. Sequential on purpose: this is
+        // the exception path, and it runs only for units the group pass
+        // failed.
+        for (size_t k = 0; k < uniq.size(); ++k) {
+            if (uniq_translated[k]) continue;
+            TranslateRequest req{key,
+                                 system_prompt + build_glossary(glossary, uniq[k]),
+                                 "Translate the following single line into " +
+                                     target_name +
+                                     ". Output only the translation:\n\n" +
+                                     uniq[k] + "\n"};
+            Result rr;
+            translate_with_retry(*adapter_ptr, req, nullptr,
+                                 [&](const Result &r) { rr = r; });
+            if (!rr.ok) continue;
+            std::vector<std::string> rl = split_lines(rr.text);
+            rl.erase(std::remove_if(rl.begin(), rl.end(),
+                                    [](const std::string &l) { return trim(l).empty(); }),
+                     rl.end());
+            std::string joined;
+            for (const auto &l : rl) {
+                if (!joined.empty()) joined += ' ';
+                joined += l;
+            }
+            std::string candidate;
+            if (validate_line(k, joined, candidate)) {
+                uniq_translations[k] = candidate;
+                uniq_translated[k] = 1;
+            }
+            if (trace) {
+                std::fprintf(stderr, "[splice] rescue line %zu %s <<<%s>>>\n",
+                             k, uniq_translated[k] ? "OK" : "FAIL",
+                             uniq_translations[k].c_str());
+            }
+        }
     }
-    // 置信度评分 (设计五): below 20% translated the model clearly failed
-    // system-wide (degraded API / auth scope) — return the original. In
-    // between, assemble per line: every translated line is verified, the rest
-    // keep their original text. For log/error triage a mixed result beats a
-    // wall of untranslated English (run r4: err1 fell back wholesale at 1/3).
+    // Fail loudly instead of returning a mixed translated/English result:
+    // after group attempts and per-line rescue, any surviving untranslated
+    // unit means the model could not produce a verified translation for it,
+    // and a half-translated log is exactly what this pipeline must never
+    // emit (user decision: complete translation or an explicit error).
     size_t translated_count =
         static_cast<size_t>(std::count(uniq_translated.begin(), uniq_translated.end(), 1));
-    const double rate =
-        uniq.empty() ? 0.0 : static_cast<double>(translated_count) / uniq.size();
-    if (rate < 0.2) {
-        set_route("splice-fallback(translated " + std::to_string(translated_count) +
-                  "/" + std::to_string(uniq.size()) + ", rate=" +
-                  std::to_string(static_cast<int>(rate * 100)) + "%)");
-        wrapped_cb({true, normalize_if_chinese(src, target), ""});
+    if (translated_count < uniq.size()) {
+        set_route("splice(incomplete translated " +
+                  std::to_string(translated_count) + "/" +
+                  std::to_string(uniq.size()) + ")");
+        wrapped_cb({false, "", "翻译失败：有 " +
+                                  std::to_string(uniq.size() - translated_count) +
+                                  " 行多次重试后仍未完成翻译，请重试"});
         return;
     }
-    set_route(rate < 0.5
-                  ? "splice(partial translated " + std::to_string(translated_count) +
-                        "/" + std::to_string(uniq.size()) + ")"
-                  : "splice(translated " + std::to_string(translated_count) + "/" +
-                        std::to_string(uniq.size()) + ")");
+    set_route("splice(translated " + std::to_string(translated_count) + "/" +
+                  std::to_string(uniq.size()) + ")");
     // Reassemble: technical-only lines verbatim, prose lines from their unit
     // translations (untranslated units already hold the original text).
     std::string out;
@@ -1156,12 +1318,14 @@ void Translator::translate(Provider provider,
         if (li + 1 < vlines.size()) out += '\n';
     }
     if (filter.repunct) out = repunct(out, src);
-    // Safety net: every technical token must still be present verbatim.
+    // Safety net: every technical token must still be present verbatim. The
+    // per-line checks above already enforce this; a whole-text miss is a
+    // pipeline bug, and returning untranslated source would hide it.
     if (!protected_tokens_preserved(src, out)) {
-        set_route("splice-fallback(token-miss, translated " +
+        set_route("splice(token-miss, translated " +
                   std::to_string(translated_count) + "/" +
                   std::to_string(uniq.size()) + ")");
-        wrapped_cb({true, normalize_if_chinese(src, target), ""});
+        wrapped_cb({false, "", "翻译失败：译文丢失了源文本中的技术标记，请重试"});
         return;
     }
     wrapped_cb({true, normalize_if_chinese(trim(out), target), ""});
