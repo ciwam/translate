@@ -250,8 +250,17 @@ func translateSplice(sp spliceParams) Result {
 			}
 		}
 		if okLine && wantCJK && !HasCJK(candidate) {
-			okLine = false
-			reason = "无 CJK 字符"
+			// A fragment with no translatable content (masked away all
+			// technical tokens; only glue words like "and", "or" remain —
+			// run: "and [[1]] go test [[2]]" echoed by the model) cannot
+			// produce CJK characters; the echo/original IS the correct
+			// translation.
+			if hasNoTranslatableContent(orig) {
+				okLine = true
+			} else {
+				okLine = false
+				reason = "无 CJK 字符"
+			}
 		}
 		if okLine {
 			if log != nil {
@@ -438,6 +447,72 @@ func rawSplitPoint(s string, i int) bool {
 		}
 		return false
 	}
+}
+
+// glueWords are English function words that carry nothing translatable when
+// they are all that remains of a masked fragment.
+var glueWords = map[string]bool{
+	"and": true, "or": true, "of": true, "the": true, "a": true, "an": true,
+	"to": true, "in": true, "on": true, "for": true, "with": true, "at": true,
+	"by": true, "from": true, "is": true, "are": true, "be": true,
+}
+
+// hasNoTranslatableContent reports whether the masked fragment holds only
+// glue words, placeholders, and short ASCII words that are pieces of the
+// masked technical tokens or command syntax ("and [[1]] go test [[2]]" —
+// "go"/"test" are command words the model cannot and should not translate).
+// Such a fragment's echo is the correct translation even for a CJK target.
+// The fragment must be short: longer all-ASCII spans (a full English
+// sentence) still need a real translation and keep the no-CJK rejection.
+func hasNoTranslatableContent(s string) bool {
+	masked, toks, _ := MaskUnit(s)
+	if len(toks) == 0 {
+		return false // unmasked unit: ordinary prose checks apply
+	}
+	if len(masked) > 80 {
+		return false // long fragment: a real translation is expected
+	}
+	for _, w := range strings.Fields(masked) {
+		if strings.HasPrefix(w, "[[") && strings.HasSuffix(w, "]]") {
+			continue // placeholder
+		}
+		word := strings.ToLower(strings.Trim(w, ".,;:!?()[]'\"`"))
+		if word == "" || glueWords[word] {
+			continue
+		}
+		// Short all-lowercase ASCII word: command syntax or a piece of a
+		// masked token ("go", "test", "list"). Reject mixed-case or long
+		// words, which read as prose (e.g. "availability").
+		if len(word) <= 6 && word == strings.ToLower(word) && isASCIILettersOrDots(word) {
+			continue
+		}
+		// A word that only exists as a piece of one of the masked tokens
+		// is technical, not prose.
+		inToken := false
+		for _, tok := range toks {
+			if strings.Contains(strings.ToLower(tok), word) {
+				inToken = true
+				break
+			}
+		}
+		if !inToken {
+			return false
+		}
+	}
+	return true
+}
+
+// isASCIILettersOrDots reports whether s holds only ASCII letters, digits,
+// dots and slashes — command/identifier material, not prose.
+func isASCIILettersOrDots(s string) bool {
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '.' || c == '/' || c == '-' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 // isPureASCII reports whether s holds only printable ASCII and whitespace —

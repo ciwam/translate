@@ -450,3 +450,33 @@ func TestRawSplitPoint(t *testing.T) {
 		t.Error("sentence end must split")
 	}
 }
+
+// Run: the fragment "and [[1]] go test [[2]]" (all technical tokens plus the
+// glue word "and") was echoed by the model — the correct translation — but
+// the no-CJK check rejected it, failing the run at 39/40.
+func TestHasNoTranslatableContent(t *testing.T) {
+	yes := []string{
+		"and CGO_ENABLED=0 go test ./...",
+		"or `1.x` to `2.x`",
+		"of `ui/doc.go`",
+	}
+	for _, s := range yes {
+		if !hasNoTranslatableContent(s) {
+			t.Errorf("hasNoTranslatableContent(%q) = false, want true", s)
+		}
+	}
+	no := []string{
+		"Read the docs carefully",
+		"Check the app's pinned version",
+		"confirm availability",
+	}
+	for _, s := range no {
+		if hasNoTranslatableContent(s) {
+			t.Errorf("hasNoTranslatableContent(%q) = true, want false", s)
+		}
+	}
+	// Unmasked units never qualify — ordinary prose checks apply.
+	if hasNoTranslatableContent("just prose here") {
+		t.Error("unmasked unit must not qualify")
+	}
+}
