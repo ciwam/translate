@@ -149,6 +149,14 @@ func translateSplice(sp spliceParams) Result {
 			// (Run: YAML "---" echoed by the model was rejected as
 			// untranslated and failed the whole translation.)
 			alreadyTarget = alreadyTarget || isLetterless(orig)
+			// A "key: value" line whose value is a technical token
+			// ("name: mygo-maintenance", "version: 1.2.3") needs no
+			// translation: the key is a field label and the value must stay
+			// verbatim, so the echo IS the correct translation. (Run: the
+			// model echoed this line every time and the run failed.)
+			if !alreadyTarget && isTechValueLine(orig) {
+				alreadyTarget = true
+			}
 			if !alreadyTarget && sp.target == 0 { // English target
 				alreadyTarget = isPureASCII(orig)
 			}
@@ -260,7 +268,10 @@ func translateSplice(sp spliceParams) Result {
 	// is rejoined. Sequential on purpose: this is the exception path.
 	// Two passes: the model's placeholder slips are stochastic (run: it
 	// invented a spurious [[14]] for a 13-token unit), so a rejected line
-	// gets a second independent chance before the run fails.
+	// gets a second independent chance before the run fails. Masked units
+	// get an explicit placeholder inventory in the prompt (run: the model
+	// split `0.x` into TWO placeholders every single time — naming the
+	// exact count fights that).
 	rescue := func(round int) {
 		pending := 0
 		for _, t := range uniqTranslated {
@@ -275,9 +286,25 @@ func translateSplice(sp spliceParams) Result {
 			if uniqTranslated[k] {
 				continue
 			}
+			system := systemPrompt + BuildGlossary(sp.glossary, uniq[k])
+			if uniqMasked[k] {
+				var list strings.Builder
+				for i, tok := range uniqTokens[k] {
+					if i > 0 {
+						list.WriteString(", ")
+					}
+					list.WriteString("[[" + itoa(i+1) + "]]=" + tok)
+				}
+				system += " The input contains exactly " + itoa(len(uniqTokens[k])) +
+					" placeholders: " + list.String() +
+					". Your reply MUST contain every one of these placeholders EXACTLY once, and NO other [[N]] placeholder."
+				if log != nil {
+					log.Debugf("单元 #%d 抢救提示含占位符清单（%d 个）", k, len(uniqTokens[k]))
+				}
+			}
 			req := provider.Request{
 				APIKey:       sp.key,
-				SystemPrompt: systemPrompt + BuildGlossary(sp.glossary, uniq[k]),
+				SystemPrompt: system,
 				UserPrompt: "Translate the following single line into " +
 					sp.targetName + ". Output only the translation:\n\n" +
 					uniq[k] + "\n",
@@ -354,4 +381,28 @@ func isLetterless(s string) bool {
 		}
 	}
 	return true
+}
+
+// isTechValueLine reports whether s is a short "key: value" line whose value
+// side is a single non-CJK word — a YAML/config field entry like
+// "name: mygo-maintenance", "version: 1.2.3" or "id: user_42". The label may
+// be translated or not; the value is an identifier/number that must stay
+// verbatim, so the model echoing the line is the correct translation. Long
+// lines and multi-word values (real prose may follow) do NOT qualify.
+func isTechValueLine(s string) bool {
+	t := strings.Trim(s, " \t\r\n")
+	if len(t) > 80 {
+		return false
+	}
+	c := strings.Index(t, ":")
+	if c <= 0 {
+		return false
+	}
+	value := strings.Trim(t[c+1:], " \t")
+	if value == "" || strings.ContainsAny(value, " \t") {
+		return false // empty or multi-word: real prose may follow
+	}
+	// The value must carry no translatable CJK content; ASCII identifiers
+	// (kebab-case, dotted versions, snake_case, numbers) all qualify.
+	return !HasCJK(value)
 }

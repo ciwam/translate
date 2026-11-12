@@ -314,3 +314,39 @@ func TestIsPureASCII(t *testing.T) {
 		t.Error("non-ASCII must fail")
 	}
 }
+
+// Run: "name: mygo-maintenance" echoed by the model every time was rejected
+// as untranslated; a short "key: <technical-token>" line needs no
+// translation, so the echo IS the correct translation.
+func TestIsTechValueLine(t *testing.T) {
+	yes := []string{
+		"name: mygo-maintenance",
+		"version: 1.2.3",
+		"id: user_42",
+	}
+	for _, s := range yes {
+		if !isTechValueLine(s) {
+			t.Errorf("isTechValueLine(%q) = false, want true", s)
+		}
+	}
+	no := []string{
+		// prose after the value
+		"description: Maintain Go applications using mygo, including UI changes.",
+		// no colon
+		"plain line",
+		// empty value
+		"name:",
+	}
+	for _, s := range no {
+		if isTechValueLine(s) {
+			t.Errorf("isTechValueLine(%q) = true, want false", s)
+		}
+	}
+	// A single-word prose value ("summary: intro") DOES qualify by shape:
+	// the model may echo it, and echoing is acceptable — the value is one
+	// word that a weak model would either keep or mistranslate; keeping is
+	// the safer outcome and the key label stays readable.
+	if !isTechValueLine("summary: intro") {
+		t.Errorf("isTechValueLine(%q) = false, want true (single-word value)", "summary: intro")
+	}
+}
