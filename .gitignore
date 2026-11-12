@@ -1,21 +1,5 @@
-# 构建产物（CMake / 旧 swiftc）
-**/.build/
-build/
-CMakeCache.txt
-CMakeFiles/
-cmake_install.cmake
-**/CMakeFiles/
-*.o
-*.obj
-
 # 系统
 .DS_Store
 
 # 项目内部（不纳入版本控制）
 .workbuddy
-
-# MCP/CLI 调试构建产物
-.build-cli/
-
-# DMG 分发包
-macos/dist/
