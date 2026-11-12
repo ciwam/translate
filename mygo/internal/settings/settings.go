@@ -1,29 +1,33 @@
 // Package settings persists user configuration. Port of
-// macos/Sources/Translate/TTSettingsStore.m, with mygo.Secrets (the macOS
-// Keychain) replacing AES-CBC file encryption.
+// macos/Sources/Translate/TTSettingsStore.m's file scheme: settings.json
+// holds per-provider API keys encrypted with AES-256-GCM under a random key
+// file (encryption.key, chmod 0600) — no Keychain involvement.
 package settings
 
 import (
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"ciwang/translate/internal/provider"
-
-	"github.com/egoist/mygo"
 )
 
-// Data is the persisted settings payload. API keys live in the system
-// credential store (Keychain on macOS), never in this file.
+// Data is the persisted settings payload.
 type Data struct {
-	ProviderIndex int    `json:"providerIndex"`
-	TargetIndex   int    `json:"targetIndex"`
-	Glossary      string `json:"glossary"`
+	ProviderIndex   int               `json:"providerIndex"`
+	TargetIndex     int               `json:"targetIndex"`
+	Glossary        string            `json:"glossary"`
+	APIKeysByProvider map[string]string `json:"apiKeysByProvider,omitempty"` // provider index (decimal) -> base64(IV|ciphertext)
 }
 
-// Store reads and writes settings.json plus per-provider keychain entries.
+// Store reads and writes settings.json and encryption.key.
 type Store struct {
 	dir string
 }
@@ -44,8 +48,6 @@ func userDataDir() (string, error) {
 	if dir := os.Getenv("TRANSLATE_SETTINGS_DIR"); dir != "" {
 		return dir, nil
 	}
-	// mygo.PathUserData requires the app to have initialized its identity;
-	// fall back to the conventional macOS location for the CLI and tests.
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
@@ -54,6 +56,7 @@ func userDataDir() (string, error) {
 }
 
 func (s *Store) settingsPath() string { return filepath.Join(s.dir, "settings.json") }
+func (s *Store) keyFilePath() string  { return filepath.Join(s.dir, "encryption.key") }
 
 func (s *Store) Load() Data {
 	d := Data{ProviderIndex: 0, TargetIndex: provider.DefaultTargetIndex()}
@@ -72,15 +75,15 @@ func (s *Store) Load() Data {
 }
 
 func (s *Store) Save(d Data) error {
+	if d.APIKeysByProvider == nil {
+		d.APIKeysByProvider = map[string]string{}
+	}
 	b, err := json.MarshalIndent(d, "", "  ")
 	if err != nil {
 		return err
 	}
 	return os.WriteFile(s.settingsPath(), b, 0o644)
 }
-
-// secretKey names the keychain entry for a provider.
-func secretKey(idx int) string { return "api-key-" + itoa(idx) }
 
 func itoa(v int) string {
 	if v == 0 {
@@ -96,23 +99,71 @@ func itoa(v int) string {
 	return string(buf[i:])
 }
 
-// APIKey reads one provider's key from the system credential store.
+// aesGCM loads or creates the 32-byte encryption key file (0600), matching
+// the TTSettingsStore scheme.
+func (s *Store) aesGCM() (cipher.AEAD, error) {
+	key, err := os.ReadFile(s.keyFilePath())
+	if err != nil || len(key) != 32 {
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return nil, err
+		}
+		key = make([]byte, 32)
+		if _, err := rand.Read(key); err != nil {
+			return nil, err
+		}
+		if err := os.WriteFile(s.keyFilePath(), key, 0o600); err != nil {
+			return nil, err
+		}
+	}
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+	return cipher.NewGCM(block)
+}
+
+// APIKey reads and decrypts one provider's key; "" when absent.
 func (s *Store) APIKey(providerIndex int) string {
-	key, err := mygo.Secrets.Get("api-key-" + itoa(providerIndex))
+	d := s.Load()
+	cipherB64 := d.APIKeysByProvider[itoa(providerIndex)]
+	if cipherB64 == "" {
+		return ""
+	}
+	gcm, err := s.aesGCM()
 	if err != nil {
 		return ""
 	}
-	return strings.TrimSpace(string(key))
+	raw, err := base64.StdEncoding.DecodeString(cipherB64)
+	if err != nil || len(raw) < gcm.NonceSize() {
+		return ""
+	}
+	plain, err := gcm.Open(nil, raw[:gcm.NonceSize()], raw[gcm.NonceSize():], nil)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(plain))
 }
 
-// SetAPIKey stores one provider's key (empty deletes the entry).
+// SetAPIKey encrypts and stores one provider's key (empty removes it).
 func (s *Store) SetAPIKey(providerIndex int, key string) error {
-	if strings.TrimSpace(key) == "" {
-		err := mygo.Secrets.Delete("api-key-" + itoa(providerIndex))
-		if err != nil && !errors.Is(err, mygo.ErrSecretNotFound) {
-			return err
-		}
-		return nil
+	d := s.Load()
+	if d.APIKeysByProvider == nil {
+		d.APIKeysByProvider = map[string]string{}
 	}
-	return mygo.Secrets.Set("api-key-"+itoa(providerIndex), []byte(key))
+	slot := itoa(providerIndex)
+	if strings.TrimSpace(key) == "" {
+		delete(d.APIKeysByProvider, slot)
+		return s.Save(d)
+	}
+	gcm, err := s.aesGCM()
+	if err != nil {
+		return fmt.Errorf("加密初始化失败：%w", err)
+	}
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return err
+	}
+	sealed := gcm.Seal(nonce, nonce, []byte(key), nil)
+	d.APIKeysByProvider[slot] = base64.StdEncoding.EncodeToString(sealed)
+	return s.Save(d)
 }
