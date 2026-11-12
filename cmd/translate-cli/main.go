@@ -96,12 +96,26 @@ func main() {
 
 	start := time.Now()
 	var route string
+	var log *pipeline.Logger
+	// TRANSLATE_VERBOSE=1 (or --verbose) dumps the full pipeline trace to
+	// stderr; stdout stays protocol-clean for the MCP wrapper.
+	verbose := false
+	for _, arg := range os.Args[1:] {
+		if arg == "--verbose" || arg == "-v" {
+			verbose = true
+		}
+	}
+	if verbose || os.Getenv("TRANSLATE_VERBOSE") == "1" {
+		log = pipeline.NewLogger()
+		defer func() { fmt.Fprint(os.Stderr, log.Render()) }()
+	}
 	adapter := provider.New(provider.Provider(prov))
 	res := pipeline.Translate(context.Background(), pipeline.Options{
 		Provider: prov,
 		Target:   tgt,
 		APIKey:   apiKey,
 		Glossary: req.Glossary,
+		Log:      log,
 	}, req.Text, adapter, nil, &route)
 	elapsed := time.Since(start).Milliseconds()
 

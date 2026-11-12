@@ -16,6 +16,7 @@ import (
 //
 // Port of the splice half of Translator::translate (translator.cpp:899-1333).
 func translateSplice(sp spliceParams) Result {
+	log := sp.log
 	vlines := splitSourceLines(sp.src)
 	proseLines := 0
 	for _, vl := range vlines {
@@ -27,9 +28,15 @@ func translateSplice(sp spliceParams) Result {
 		// Entirely technical (a config, a pure build-log header): nothing to
 		// translate — return the source verbatim, structure intact.
 		sp.setRoute("splice-verbatim(no prose)")
+		if log != nil {
+			log.Infof("全部 %d 行均为技术行，无需翻译，原文返回", len(vlines))
+		}
 		return Result{OK: true, Text: normalizeIfChinese(sp.target, sp.src)}
 	}
 	sp.setRoute("splice(started " + itoa(proseLines) + " lines)")
+	if log != nil {
+		log.Infof("共 %d 行，其中 %d 行含可翻译内容", len(vlines), proseLines)
+	}
 
 	// Unique translation units: each prose line becomes one unit (split at
 	// sentence boundaries first when it exceeds the context budget). Weak
@@ -57,6 +64,13 @@ func translateSplice(sp spliceParams) Result {
 		uniqOrig = append(uniqOrig, t)
 		uniqTokens = append(uniqTokens, toks)
 		uniqMasked = append(uniqMasked, m)
+		if log != nil {
+			if m {
+				log.Debugf("单元 #%d（掩码 %d 个 token）: %q", id, len(toks), masked)
+			} else {
+				log.Debugf("单元 #%d（未掩码）: %q", id, t)
+			}
+		}
 		return id
 	}
 	for _, vl := range vlines {
@@ -116,6 +130,12 @@ func translateSplice(sp spliceParams) Result {
 	// the reply echoing the source line, and a CJK target whose reply
 	// contains no CJK character at all.
 	validateLine := func(k int, replyLine string) (string, bool) {
+		reject := func(reason string) (string, bool) {
+			if log != nil {
+				log.Warnf("单元 #%d 校验拒绝（%s）: 回复 %q", k, reason, strings.Trim(replyLine, " \t\r\n"))
+			}
+			return "", false
+		}
 		orig := uniqOrig[k]
 		rt := strings.Trim(replyLine, " \t\r\n")
 		if rt == "" || rt == strings.Trim(orig, " \t\r\n") {
@@ -128,12 +148,19 @@ func translateSplice(sp spliceParams) Result {
 				alreadyTarget = isPureASCII(orig)
 			}
 			if rt != "" && alreadyTarget {
+				if log != nil {
+					log.Debugf("单元 #%d 原文即目标语言，原文返回", k)
+				}
 				return orig, true
 			}
-			return "", false
+			if rt == "" {
+				return reject("空回复")
+			}
+			return reject("回声（未翻译）")
 		}
 		var candidate string
 		var okLine bool
+		var reason string
 		if uniqMasked[k] {
 			// Masked unit: restore [[N]] placeholders verbatim; any
 			// missing/malformed placeholder fails the whole line.
@@ -141,6 +168,11 @@ func translateSplice(sp spliceParams) Result {
 			if okLine {
 				candidate = Repunct(candidate, orig)
 				okLine = !IsBadTranslation(candidate)
+				if !okLine {
+					reason = "坏译文守卫"
+				}
+			} else {
+				reason = "占位符恢复失败（缺失/畸形）"
 			}
 		} else {
 			// Unmasked unit (no protected tokens): punctuation
@@ -149,14 +181,24 @@ func translateSplice(sp spliceParams) Result {
 			bad := IsBadTranslation(candidate)
 			kept := ProtectedTokensPreserved(uniqOrig[k], candidate)
 			okLine = !bad && kept
+			switch {
+			case bad:
+				reason = "坏译文守卫"
+			case !kept:
+				reason = "技术 token 丢失"
+			}
 		}
 		if okLine && wantCJK && !HasCJK(candidate) {
 			okLine = false
+			reason = "无 CJK 字符"
 		}
 		if okLine {
+			if log != nil {
+				log.Debugf("单元 #%d 校验通过: %q", k, candidate)
+			}
 			return candidate, true
 		}
-		return "", false
+		return reject(reason)
 	}
 
 	// Group triage: a count mismatch (merged/split/wrapped lines) fails the
@@ -188,6 +230,10 @@ func translateSplice(sp spliceParams) Result {
 			}
 		}
 		if len(filtered) != gEnd-g {
+			if log != nil {
+				log.Warnf("组 %d 行数不对齐（回复 %d 行 / 输入 %d 行），整组转入逐行抢救",
+					gi+1, len(filtered), gEnd-g)
+			}
 			continue
 		}
 		for k := g; k < gEnd; k++ {
@@ -207,6 +253,17 @@ func translateSplice(sp spliceParams) Result {
 	// request. One line per request cannot be merged with neighbours or
 	// dropped, so alignment is trivial; a reply wrapped across several lines
 	// is rejoined. Sequential on purpose: this is the exception path.
+	if log != nil {
+		pending := 0
+		for _, t := range uniqTranslated {
+			if !t {
+				pending++
+			}
+		}
+		if pending > 0 {
+			log.Infof("抢救阶段：%d 个单元进入逐行重试", pending)
+		}
+	}
 	for k := 0; k < len(uniq); k++ {
 		if uniqTranslated[k] {
 			continue
@@ -218,8 +275,11 @@ func translateSplice(sp spliceParams) Result {
 				sp.targetName + ". Output only the translation:\n\n" +
 				uniq[k] + "\n",
 		}
-		rr := translateWithRetry(sp.ctx, sp.adapter, req, nil)
+		rr := translateWithRetryLog(sp.ctx, sp.adapter, req, nil, log)
 		if !rr.OK {
+			if log != nil {
+				log.Errorf("单元 #%d 抢救请求失败: %s", k, rr.Error)
+			}
 			continue
 		}
 		var joined strings.Builder
@@ -235,6 +295,9 @@ func translateSplice(sp spliceParams) Result {
 		if candidate, ok := validateLine(k, joined.String()); ok {
 			uniqTranslations[k] = candidate
 			uniqTranslated[k] = true
+			if log != nil {
+				log.Infof("单元 #%d 抢救成功", k)
+			}
 		}
 	}
 

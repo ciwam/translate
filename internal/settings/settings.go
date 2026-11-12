@@ -21,9 +21,9 @@ import (
 
 // Data is the persisted settings payload.
 type Data struct {
-	ProviderIndex   int               `json:"providerIndex"`
-	TargetIndex     int               `json:"targetIndex"`
-	Glossary        string            `json:"glossary"`
+	ProviderIndex     int               `json:"providerIndex"`
+	TargetIndex       int               `json:"targetIndex"`
+	Glossary          string            `json:"glossary"`
 	APIKeysByProvider map[string]string `json:"apiKeysByProvider,omitempty"` // provider index (decimal) -> base64(IV|ciphertext)
 }
 

@@ -34,12 +34,35 @@ var promptNames = []string{
 	"Spanish",            // 6
 }
 
+var targetCodes = []string{"en", "zh", "ja", "ko", "fr", "de", "es"}
+
+var providerNames = []string{"zhipu", "siliconflow"}
+
+// logTargetName is a safe display name for logging.
+func logTargetName(i int) string {
+	if i < 0 || i >= len(targetCodes) {
+		return "?"
+	}
+	return targetCodes[i]
+}
+
+// logProviderName is a safe display name for logging.
+func logProviderName(i int) string {
+	if i < 0 || i >= len(providerNames) {
+		return "?"
+	}
+	return providerNames[i]
+}
+
 // Options carries per-call configuration.
 type Options struct {
 	Provider int
 	Target   int
 	APIKey   string
 	Glossary string
+	// Log, when non-nil, receives a detailed trace of the run (routing,
+	// group requests/replies, per-line verdicts, rescue retries).
+	Log *Logger
 }
 
 // Result mirrors provider.Result for pipeline callers.
@@ -55,6 +78,9 @@ func Translate(ctx context.Context, opts Options, text string, adapter provider.
 		if debugRoute != nil {
 			*debugRoute = r
 		}
+		if opts.Log != nil {
+			opts.Log.Infof("路由: %s", r)
+		}
 	}
 	key := strings.Trim(opts.APIKey, " \t\r\n")
 	if key == "" {
@@ -64,7 +90,21 @@ func Translate(ctx context.Context, opts Options, text string, adapter provider.
 	if src == "" {
 		return Result{Error: "请输入要翻译的文本"}
 	}
+	if opts.Log != nil {
+		opts.Log.Infof("开始翻译: %d 字节, provider=%s, target=%s",
+			len(src), logProviderName(opts.Provider), logTargetName(opts.Target))
+		opts.Log.Debugf("源文本: %q", src)
+	}
 	glossaryBlock := BuildGlossary(opts.Glossary, src)
+	if opts.Log != nil {
+		if glossaryBlock != "" {
+			opts.Log.Infof("术语词典注入 %d 条（按上下文过滤）",
+				strings.Count(glossaryBlock, "\n")-1)
+			opts.Log.Debugf("词典块: %q", glossaryBlock)
+		} else if strings.TrimSpace(opts.Glossary) != "" {
+			opts.Log.Infof("术语词典无命中条目，未注入")
+		}
+	}
 
 	// In-process cache: identical input returns the identical, deterministic
 	// result immediately, and never lets the stochastic model produce a
@@ -120,6 +160,13 @@ func Translate(ctx context.Context, opts Options, text string, adapter provider.
 
 	// ---- Routing ----
 	hasTech := AnalyzeTechnical(src)
+	if opts.Log != nil {
+		if hasTech {
+			opts.Log.Infof("检测到技术 token，走 splice 管线")
+		} else {
+			opts.Log.Infof("纯文本，直译（prose 路径）")
+		}
+	}
 	if !hasTech {
 		systemPrompt := "You are a professional translator. Translate the user's text " +
 			"exactly into the requested target language, in natural, fluent " +
@@ -140,6 +187,9 @@ func Translate(ctx context.Context, opts Options, text string, adapter provider.
 		if len(src) > proseChunkBudget {
 			pieces := SplitPieces(src, proseChunkBudget)
 			setRoute("prose-chunked(" + itoa(len(pieces)) + " pieces)")
+			if opts.Log != nil {
+				opts.Log.Infof("文本超过 %d 字节预算，切为 %d 段顺序翻译", proseChunkBudget, len(pieces))
+			}
 			var result strings.Builder
 			for i, p := range pieces {
 				req := provider.Request{
@@ -148,7 +198,10 @@ func Translate(ctx context.Context, opts Options, text string, adapter provider.
 					UserPrompt: "Translate the following text into " + targetName +
 						". Provide only the translation:\n\n" + p.Text,
 				}
-				rr := translateWithRetry(ctx, adapter, req, nil)
+				if opts.Log != nil {
+					opts.Log.Debugf("段 %d/%d: %q", i+1, len(pieces), p.Text)
+				}
+				rr := translateWithRetryLog(ctx, adapter, req, nil, opts.Log)
 				if !rr.OK {
 					return wrapResult(rr)
 				}
@@ -172,7 +225,7 @@ func Translate(ctx context.Context, opts Options, text string, adapter provider.
 			UserPrompt: "Translate the following text into " + targetName +
 				". Provide only the translation:\n\n" + src,
 		}
-		rr := translateWithRetry(ctx, adapter, req, func(delta string) {
+		rr := translateWithRetryLog(ctx, adapter, req, func(delta string) {
 			if onDelta != nil {
 				res := strings.Trim(delta, " \t\r\n")
 				if filter.StripExplanations {
@@ -180,7 +233,7 @@ func Translate(ctx context.Context, opts Options, text string, adapter provider.
 				}
 				onDelta(normalizeIfChinese(tIdx, res))
 			}
-		})
+		}, opts.Log)
 		if rr.OK {
 			res := strings.Trim(rr.Text, " \t\r\n")
 			if filter.StripExplanations {
@@ -204,6 +257,7 @@ func Translate(ctx context.Context, opts Options, text string, adapter provider.
 		filter:      filter,
 		setRoute:    setRoute,
 		onDelta:     onDelta,
+		log:         opts.Log,
 	})
 }
 
@@ -220,6 +274,7 @@ type spliceParams struct {
 	filter      filterConfig
 	setRoute    func(string)
 	onDelta     func(string)
+	log         *Logger
 }
 
 // lineInfo mirrors LineInfo (translator.cpp:113).
@@ -321,12 +376,21 @@ func runGroupWorkers(sp spliceParams, systemPrompt string, uniq []string, groups
 					itoa(gEnd-g) + " lines into " + sp.targetName +
 					":\n\n" + block.String(),
 			}
+			if sp.log != nil {
+				sp.log.Infof("组 %d/%d 发起请求（%d 行）", gi+1, groups, gEnd-g)
+				sp.log.Debugf("组 %d 请求体:\n%s", gi+1, block.String())
+			}
 			sem <- struct{}{}
-			rr := translateWithRetry(sp.ctx, sp.adapter, req, nil)
+			rr := translateWithRetryLog(sp.ctx, sp.adapter, req, nil, sp.log)
 			<-sem
 			groupResults[gi] = rr
 			if rr.OK {
 				groupLines[gi] = SplitLines(rr.Text)
+				if sp.log != nil {
+					sp.log.Debugf("组 %d 回复:\n%s", gi+1, rr.Text)
+				}
+			} else if sp.log != nil {
+				sp.log.Errorf("组 %d 请求失败: %s", gi+1, rr.Error)
 			}
 		}(gi)
 	}

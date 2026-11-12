@@ -52,6 +52,12 @@ type app struct {
 
 	// result scroll follows the stream only while the user is at the bottom.
 	resultScroll ui.ScrollState
+	logScroll    ui.ScrollState
+
+	// tab: 0 = 翻译, 1 = 日志
+	tab int
+	// log holds the latest run's trace.
+	log *pipeline.Logger
 
 	win *mygo.Window
 }
@@ -82,6 +88,7 @@ func (a *app) translateFromView() {
 	a.phase = 1
 	a.status = "翻译中…"
 	a.output = ""
+	a.log = pipeline.NewLogger()
 
 	pIdx := a.providerIdx
 	tIdx := a.targetIdx
@@ -97,6 +104,7 @@ func (a *app) translateFromView() {
 			Target:   tIdx,
 			APIKey:   key,
 			Glossary: glossary,
+			Log:      a.log,
 		}, src, adapter, func(delta string) {
 			mygo.RunOnMain(func() {
 				if a.generation != gen {
@@ -134,7 +142,22 @@ func (a *app) view(c *ui.Context) {
 
 	// Root: padded column filling the window.
 	ui.Column(c).Fill().Padding(12).Gap(8).Children(func() {
-		a.mainContent(c, t)
+		// Tab bar: 翻译 / 日志.
+		ui.Row(c).Gap(4).Children(func() {
+			if ui.Button(c, "翻译").Clicked() {
+				a.tab = 0
+			}
+			if ui.Button(c, "日志").Clicked() {
+				a.tab = 1
+			}
+			ui.Text(c, "").Grow(1)
+		})
+
+		if a.tab == 1 {
+			a.logView(c)
+		} else {
+			a.mainContent(c, t)
+		}
 	})
 
 	a.settingsView(c)
