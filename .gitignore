@@ -3,3 +3,8 @@
 
 # 项目内部（不纳入版本控制）
 .workbuddy
+
+# mygo 构建产物
+/build/
+/.mygo/
+mygo_windows_*.syso
