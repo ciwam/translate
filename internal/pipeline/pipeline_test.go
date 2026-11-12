@@ -293,3 +293,24 @@ func TestLineHasProse(t *testing.T) {
 		t.Error("prose line must have prose")
 	}
 }
+
+// Run: YAML "---" echoed by the model was rejected as "untranslated echo"
+// and failed the whole translation. A letterless line has nothing to
+// translate; its echo IS the correct translation.
+func TestLetterlessEchoAccepted(t *testing.T) {
+	if !isLetterless("---") || !isLetterless("***") || !isLetterless("| |") {
+		t.Error("pure punctuation lines must be letterless")
+	}
+	if isLetterless("name: mygo-maintenance") || isLetterless("中文") {
+		t.Error("lines with letters/CJK are not letterless")
+	}
+}
+
+func TestIsPureASCII(t *testing.T) {
+	if !isPureASCII("plain english 123!") {
+		t.Error("printable ASCII must pass")
+	}
+	if isPureASCII("héllo") {
+		t.Error("non-ASCII must fail")
+	}
+}

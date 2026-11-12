@@ -144,6 +144,11 @@ func translateSplice(sp spliceParams) Result {
 			// unchanged (mixed-language input, or an English target fed
 			// English text): then the echo IS the correct translation.
 			alreadyTarget := wantCJK && HasCJK(orig)
+			// A line with no letters or digits ("---", "***", "| |") has
+			// nothing to translate: the echo IS the correct translation.
+			// (Run: YAML "---" echoed by the model was rejected as
+			// untranslated and failed the whole translation.)
+			alreadyTarget = alreadyTarget || isLetterless(orig)
 			if !alreadyTarget && sp.target == 0 { // English target
 				alreadyTarget = isPureASCII(orig)
 			}
@@ -253,53 +258,58 @@ func translateSplice(sp spliceParams) Result {
 	// request. One line per request cannot be merged with neighbours or
 	// dropped, so alignment is trivial; a reply wrapped across several lines
 	// is rejoined. Sequential on purpose: this is the exception path.
-	if log != nil {
+	// Two passes: the model's placeholder slips are stochastic (run: it
+	// invented a spurious [[14]] for a 13-token unit), so a rejected line
+	// gets a second independent chance before the run fails.
+	rescue := func(round int) {
 		pending := 0
 		for _, t := range uniqTranslated {
 			if !t {
 				pending++
 			}
 		}
-		if pending > 0 {
-			log.Infof("抢救阶段：%d 个单元进入逐行重试", pending)
+		if log != nil && pending > 0 {
+			log.Infof("抢救第 %d 轮：%d 个单元进入逐行重试", round, pending)
 		}
-	}
-	for k := 0; k < len(uniq); k++ {
-		if uniqTranslated[k] {
-			continue
-		}
-		req := provider.Request{
-			APIKey:       sp.key,
-			SystemPrompt: systemPrompt + BuildGlossary(sp.glossary, uniq[k]),
-			UserPrompt: "Translate the following single line into " +
-				sp.targetName + ". Output only the translation:\n\n" +
-				uniq[k] + "\n",
-		}
-		rr := translateWithRetryLog(sp.ctx, sp.adapter, req, nil, log)
-		if !rr.OK {
-			if log != nil {
-				log.Errorf("单元 #%d 抢救请求失败: %s", k, rr.Error)
-			}
-			continue
-		}
-		var joined strings.Builder
-		for _, l := range SplitLines(rr.Text) {
-			if strings.Trim(l, " \t\r\n") == "" {
+		for k := 0; k < len(uniq); k++ {
+			if uniqTranslated[k] {
 				continue
 			}
-			if joined.Len() > 0 {
-				joined.WriteByte(' ')
+			req := provider.Request{
+				APIKey:       sp.key,
+				SystemPrompt: systemPrompt + BuildGlossary(sp.glossary, uniq[k]),
+				UserPrompt: "Translate the following single line into " +
+					sp.targetName + ". Output only the translation:\n\n" +
+					uniq[k] + "\n",
 			}
-			joined.WriteString(l)
-		}
-		if candidate, ok := validateLine(k, joined.String()); ok {
-			uniqTranslations[k] = candidate
-			uniqTranslated[k] = true
-			if log != nil {
-				log.Infof("单元 #%d 抢救成功", k)
+			rr := translateWithRetryLog(sp.ctx, sp.adapter, req, nil, log)
+			if !rr.OK {
+				if log != nil {
+					log.Errorf("单元 #%d 抢救请求失败: %s", k, rr.Error)
+				}
+				continue
+			}
+			var joined strings.Builder
+			for _, l := range SplitLines(rr.Text) {
+				if strings.Trim(l, " \t\r\n") == "" {
+					continue
+				}
+				if joined.Len() > 0 {
+					joined.WriteByte(' ')
+				}
+				joined.WriteString(l)
+			}
+			if candidate, ok := validateLine(k, joined.String()); ok {
+				uniqTranslations[k] = candidate
+				uniqTranslated[k] = true
+				if log != nil {
+					log.Infof("单元 #%d 抢救成功", k)
+				}
 			}
 		}
 	}
+	rescue(1)
+	rescue(2)
 
 	// Fail loudly instead of returning a mixed translated/English result:
 	// after group attempts and per-line rescue, any surviving untranslated
@@ -327,6 +337,21 @@ func isPureASCII(s string) bool {
 			continue
 		}
 		return false
+	}
+	return true
+}
+
+// isLetterless reports whether s holds no ASCII letter and no CJK character
+// — pure punctuation/symbol lines ("---", "***", "===", "|---|") that no
+// model can "translate"; its echo is the correct translation.
+func isLetterless(s string) bool {
+	for _, r := range s {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
+			return false
+		}
+		if r >= 0x3000 { // CJK and full-width ranges start here
+			return false
+		}
 	}
 	return true
 }
