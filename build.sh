@@ -1,25 +1,33 @@
 #!/bin/bash
 # 构建脚本：测试 + 打包 Translate.app / DMG
-#
-# 用法:
-#   ./build.sh            # 测试 + 打包 .app 和 DMG
-#   ./build.sh test       # 只跑测试
-#   ./build.sh app        # 测试 + 打包 .app（跳过 DMG）
-#   ./build.sh dmg        # 测试 + 打包 .app 和 DMG
-#   ./build.sh run        # 测试 + 打包并启动 .app
-#   ./build.sh dev        # 开发模式（热重载，Ctrl+C 退出）
-#   ./build.sh clean      # 清理构建产物
 set -euo pipefail
 
 MYGO="go tool mygo"
 APP="build/darwin-arm64/Translate.app"
+
+usage() {
+    cat <<EOF
+用法: ./build.sh [命令]
+
+命令:
+  dmg     测试 + 打包 Translate.app 与 DMG
+  app     测试 + 打包 Translate.app（跳过 DMG）
+  run     测试 + 打包并启动 Translate.app
+  test    只运行测试
+  dev     开发模式（热重载，Ctrl+C 退出）
+  clean   清理构建产物（build/ 与 .mygo/）
+  help    显示本帮助
+EOF
+}
 
 run_tests() {
     echo "==> 运行测试"
     go test ./...
 }
 
-case "${1:-dmg}" in
+cmd="${1:-help}"
+
+case "$cmd" in
     test)
         run_tests
         ;;
@@ -36,7 +44,7 @@ case "${1:-dmg}" in
         $MYGO build
         echo "产物: $APP"
         ;;
-    dmg|*)
+    dmg)
         run_tests
         echo "==> 打包 Translate.app 与 DMG"
         $MYGO build
@@ -48,5 +56,13 @@ case "${1:-dmg}" in
         echo "==> 打包并启动"
         $MYGO build
         open "$APP"
+        ;;
+    help|-h|--help)
+        usage
+        ;;
+    *)
+        echo "未知命令: $1" >&2
+        usage >&2
+        exit 1
         ;;
 esac
