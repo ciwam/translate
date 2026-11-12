@@ -1,0 +1,335 @@
+// Pipeline orchestration: a faithful port of Translator::translate
+// (translator.cpp:758). Route A streams pure prose; Route B is the
+// deterministic splice pipeline for text with technical tokens.
+package pipeline
+
+import (
+	"context"
+	"strings"
+	"sync"
+
+	"ciwang/translate/internal/provider"
+)
+
+// FilterConfig maps each provider's known "bad habits" to a post-filter
+// config. Swapping the model only changes which row is loaded.
+type filterConfig struct {
+	NewlineGuard      bool // restore dropped line breaks (Qwen's habit)
+	StripExplanations bool // remove model-added "译文：" style labels (GPT)
+	Repunct           bool // force half-width delimiters for structured logs
+}
+
+var filters = []filterConfig{
+	{true, true, true}, // Zhipu · GLM-4-Flash
+	{true, true, true}, // SiliconFlow · Qwen2.5-7B-Instruct
+}
+
+var promptNames = []string{
+	"English",            // 0
+	"Simplified Chinese", // 1
+	"Japanese",           // 2
+	"Korean",             // 3
+	"French",             // 4
+	"German",             // 5
+	"Spanish",            // 6
+}
+
+// Options carries per-call configuration.
+type Options struct {
+	Provider int
+	Target   int
+	APIKey   string
+	Glossary string
+}
+
+// Result mirrors provider.Result for pipeline callers.
+type Result = provider.Result
+
+// Translate runs the full kernel. onDelta, when non-nil, receives the
+// running full result (overwrite semantics, valid UTF-8 prefix). The
+// debugRoute pointer, when non-nil, receives a one-line diagnostic naming
+// the pipeline path — same strings as the C++ kernel so the MCP tooling
+// keeps working.
+func Translate(ctx context.Context, opts Options, text string, adapter provider.Translator, onDelta func(string), debugRoute *string) Result {
+	setRoute := func(r string) {
+		if debugRoute != nil {
+			*debugRoute = r
+		}
+	}
+	key := strings.Trim(opts.APIKey, " \t\r\n")
+	if key == "" {
+		return Result{Error: "请填写 API Key"}
+	}
+	src := strings.Trim(text, " \t\r\n")
+	if src == "" {
+		return Result{Error: "请输入要翻译的文本"}
+	}
+	glossaryBlock := BuildGlossary(opts.Glossary, src)
+
+	// In-process cache: identical input returns the identical, deterministic
+	// result immediately, and never lets the stochastic model produce a
+	// different translation for the same text across runs.
+	ckey := CacheKey(opts.Provider, opts.Target, src, opts.Glossary)
+	if cached, ok := resultCacheDefault.get(ckey); ok {
+		setRoute("cache")
+		return Result{OK: true, Text: cached}
+	}
+
+	pIdx := opts.Provider
+	if pIdx < 0 || pIdx >= len(filters) {
+		pIdx = 0
+	}
+	tIdx := opts.Target
+	if tIdx < 0 || tIdx >= len(promptNames) {
+		tIdx = 0
+	}
+
+	// Strengthen the prompt against the two known failure modes: echoing
+	// the source unchanged (short words/phrases), and emitting Traditional
+	// Chinese for a Simplified-Chinese target.
+	var targetName, constraints string
+	if tIdx == Chinese {
+		targetName = "Mainland China Simplified Chinese " +
+			"(中国大陆简体字，禁止使用繁体字)"
+		constraints = "Use only Mainland China standard simplified " +
+			"characters. Do NOT use traditional Chinese characters."
+	} else {
+		targetName = promptNames[tIdx]
+	}
+
+	filter := filters[pIdx]
+
+	emitProse := func(raw string) Result {
+		res := strings.Trim(raw, " \t\r\n")
+		if filter.StripExplanations {
+			res = StripExplanations(res)
+		}
+		r := Result{OK: true, Text: normalizeIfChinese(tIdx, res)}
+		if r.OK {
+			resultCacheDefault.put(ckey, r.Text)
+		}
+		return r
+	}
+
+	wrapResult := func(r Result) Result {
+		if r.OK {
+			resultCacheDefault.put(ckey, r.Text)
+		}
+		return r
+	}
+
+	// ---- Routing ----
+	hasTech := AnalyzeTechnical(src)
+	if !hasTech {
+		systemPrompt := "You are a professional translator. Translate the user's text " +
+			"exactly into the requested target language, in natural, fluent " +
+			"phrasing. Always provide a translation; never echo or return the " +
+			"original text unchanged. " +
+			"Preserve verbatim every non-language token exactly as written: " +
+			"numbers, percent signs, brackets, file paths, code identifiers, " +
+			"URLs, and command names. Never reword, reorder, drop, or recompute " +
+			"them. Keep the exact line structure and translate the text " +
+			"completely without truncating or omitting any line. Output only the " +
+			"translated text, with no explanations, notes, examples, or " +
+			"quotation marks. " + constraints + glossaryBlock
+		// Chunk over-long prose at line / sentence boundaries so no single
+		// request crosses the context window; translate sequentially and
+		// rejoin with the original separators (deltas stream the running
+		// result).
+		const proseChunkBudget = 1500
+		if len(src) > proseChunkBudget {
+			pieces := SplitPieces(src, proseChunkBudget)
+			setRoute("prose-chunked(" + itoa(len(pieces)) + " pieces)")
+			var result strings.Builder
+			for i, p := range pieces {
+				req := provider.Request{
+					APIKey:       key,
+					SystemPrompt: systemPrompt,
+					UserPrompt: "Translate the following text into " + targetName +
+						". Provide only the translation:\n\n" + p.Text,
+				}
+				rr := translateWithRetry(ctx, adapter, req, nil)
+				if !rr.OK {
+					return wrapResult(rr)
+				}
+				result.WriteString(rr.Text)
+				if i+1 < len(pieces) {
+					result.WriteString(p.Sep)
+				}
+				if onDelta != nil {
+					onDelta(result.String()) // running full result so far
+				}
+			}
+			if result.Len() > 0 {
+				return emitProse(result.String())
+			}
+			return Result{OK: true, Text: ""}
+		}
+		setRoute("prose")
+		req := provider.Request{
+			APIKey:       key,
+			SystemPrompt: systemPrompt,
+			UserPrompt: "Translate the following text into " + targetName +
+				". Provide only the translation:\n\n" + src,
+		}
+		rr := translateWithRetry(ctx, adapter, req, func(delta string) {
+			if onDelta != nil {
+				res := strings.Trim(delta, " \t\r\n")
+				if filter.StripExplanations {
+					res = StripExplanations(res)
+				}
+				onDelta(normalizeIfChinese(tIdx, res))
+			}
+		})
+		if rr.OK {
+			res := strings.Trim(rr.Text, " \t\r\n")
+			if filter.StripExplanations {
+				res = StripExplanations(res)
+			}
+			rr = Result{OK: true, Text: normalizeIfChinese(tIdx, res)}
+		}
+		return wrapResult(rr)
+	}
+
+	// ---- Splice mode v2.1 (technical tokens present) ----
+	return translateSplice(spliceParams{
+		ctx:         ctx,
+		adapter:     adapter,
+		key:         key,
+		src:         src,
+		target:      tIdx,
+		targetName:  targetName,
+		constraints: constraints,
+		glossary:    opts.Glossary,
+		filter:      filter,
+		setRoute:    setRoute,
+		onDelta:     onDelta,
+	})
+}
+
+// spliceParams bundles everything the splice route needs.
+type spliceParams struct {
+	ctx         context.Context
+	adapter     provider.Translator
+	key         string
+	src         string
+	target      int
+	targetName  string
+	constraints string
+	glossary    string
+	filter      filterConfig
+	setRoute    func(string)
+	onDelta     func(string)
+}
+
+// lineInfo mirrors LineInfo (translator.cpp:113).
+type lineInfo struct {
+	text     string
+	hasProse bool
+}
+
+// splitSourceLines mirrors the C++ line splitting (translator.cpp:910).
+func splitSourceLines(src string) []lineInfo {
+	var vlines []lineInfo
+	pos := 0
+	for {
+		nl := strings.IndexByte(src[pos:], '\n')
+		var line string
+		if nl < 0 {
+			line = src[pos:]
+		} else {
+			line = src[pos : pos+nl]
+		}
+		line = strings.TrimSuffix(line, "\r")
+		vlines = append(vlines, lineInfo{text: line, hasProse: lineHasProse(line)})
+		if nl < 0 {
+			break
+		}
+		pos += nl + 1
+	}
+	return vlines
+}
+
+// spliceResult assembles the final answer after splice translation.
+func spliceResult(sp spliceParams, vlines []lineInfo, uniqTranslations []string, lineUnits [][]int, translatedCount, uniqCount int) Result {
+	if translatedCount < uniqCount {
+		sp.setRoute("splice(incomplete translated " +
+			itoa(translatedCount) + "/" + itoa(uniqCount) + ")")
+		return Result{Error: "翻译失败：有 " +
+			itoa(uniqCount-translatedCount) +
+			" 行多次重试后仍未完成翻译，请重试"}
+	}
+	sp.setRoute("splice(translated " + itoa(translatedCount) + "/" + itoa(uniqCount) + ")")
+	// Reassemble: technical-only lines verbatim, prose lines from their unit
+	// translations.
+	var out strings.Builder
+	for li, vl := range vlines {
+		if !vl.hasProse {
+			out.WriteString(vl.text)
+		} else {
+			for j, u := range lineUnits[li] {
+				if j > 0 {
+					out.WriteString(" ")
+				}
+				out.WriteString(uniqTranslations[u])
+			}
+		}
+		if li+1 < len(vlines) {
+			out.WriteByte('\n')
+		}
+	}
+	result := out.String()
+	if sp.filter.Repunct {
+		result = Repunct(result, sp.src)
+	}
+	// Safety net: every technical token must still be present verbatim. The
+	// per-line checks already enforce this; a whole-text miss is a pipeline
+	// bug, and returning untranslated source would hide it.
+	if !ProtectedTokensPreserved(sp.src, result) {
+		sp.setRoute("splice(token-miss, translated " +
+			itoa(translatedCount) + "/" + itoa(uniqCount) + ")")
+		return Result{Error: "翻译失败：译文丢失了源文本中的技术标记，请重试"}
+	}
+	return Result{OK: true, Text: normalizeIfChinese(sp.target, strings.Trim(result, " \t\r\n"))}
+}
+
+// runGroupWorkers fans the group requests out with bounded parallelism and
+// returns each group's (result, reply-lines).
+func runGroupWorkers(sp spliceParams, systemPrompt string, uniq []string, groups int, groupSize int) ([]Result, [][]string) {
+	groupResults := make([]Result, groups)
+	groupLines := make([][]string, groups)
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 3) // max 3 concurrent workers
+	for gi := 0; gi < groups; gi++ {
+		wg.Add(1)
+		go func(gi int) {
+			defer wg.Done()
+			g := gi * groupSize
+			gEnd := g + groupSize
+			if gEnd > len(uniq) {
+				gEnd = len(uniq)
+			}
+			var block strings.Builder
+			for k := g; k < gEnd; k++ {
+				block.WriteString(uniq[k])
+				block.WriteByte('\n')
+			}
+			req := provider.Request{
+				APIKey:       sp.key,
+				SystemPrompt: systemPrompt + BuildGlossary(sp.glossary, block.String()),
+				UserPrompt: "Translate each of the following " +
+					itoa(gEnd-g) + " lines into " + sp.targetName +
+					":\n\n" + block.String(),
+			}
+			sem <- struct{}{}
+			rr := translateWithRetry(sp.ctx, sp.adapter, req, nil)
+			<-sem
+			groupResults[gi] = rr
+			if rr.OK {
+				groupLines[gi] = SplitLines(rr.Text)
+			}
+		}(gi)
+	}
+	wg.Wait()
+	return groupResults, groupLines
+}
