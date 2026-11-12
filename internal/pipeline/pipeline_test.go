@@ -350,3 +350,103 @@ func TestIsTechValueLine(t *testing.T) {
 		t.Errorf("isTechValueLine(%q) = false, want true (single-word value)", "summary: intro")
 	}
 }
+
+// splitAtSentencesForTest mirrors the closure in translateSplice at package
+// level so tests can exercise the splitting logic.
+func splitAtSentencesForTest(text string) []string {
+	var out []string
+	var build func(string)
+	build = func(s string) {
+		_, toks, _ := MaskUnit(s)
+		if len(toks) <= maxUnitPlaceholders {
+			out = append(out, s)
+			return
+		}
+		mid := len(s) / 2
+		best := -1
+		bestDist := len(s) + 1
+		for i := 0; i < len(s); i++ {
+			if !rawSplitPoint(s, i) {
+				continue
+			}
+			// The mark STAYS with the left fragment (split after it).
+			left := strings.TrimRight(s[:i+1], " ")
+			right := strings.TrimLeft(s[i+1:], " ")
+			if left == "" || right == "" {
+				continue
+			}
+			d := i - mid
+			if d < 0 {
+				d = -d
+			}
+			if d < bestDist {
+				bestDist = d
+				best = i
+			}
+		}
+		if best < 0 {
+			out = append(out, s)
+			return
+		}
+		build(strings.TrimRight(s[:best+1], " "))
+		build(strings.TrimLeft(s[best+1:], " "))
+	}
+	build(text)
+	return out
+}
+
+// Run: units with many placeholders had middle placeholders deterministically
+// dropped by the model ([[2]] swallowed, `0.x` split in two). splitAtSentences
+// splits the raw line until every fragment re-masks to <= maxUnitPlaceholders
+// placeholders.
+func TestSplitHeavyUnit(t *testing.T) {
+	// A sentence with many protected tokens, like the failing unit #4.
+	line := "Check the app's pinned MyGo version before changing APIs. Locate its source with `go list`. Read docs/ui/migration.md only for major-version upgrades, while on `0.x` (for example, `0.2.x` to `0.3.x`, or `1.x` to `2.x`). Confirm API availability."
+	_, toks, ok := MaskUnit(line)
+	if !ok || len(toks) <= maxUnitPlaceholders {
+		t.Fatalf("test premise: expected >%d tokens, got %d", maxUnitPlaceholders, len(toks))
+	}
+	ids := splitAtSentencesForTest(line)
+	if len(ids) <= 1 {
+		t.Fatal("heavy unit must split into multiple units")
+	}
+	var rebuilt strings.Builder
+	for i, frag := range ids {
+		_, ftoks, _ := MaskUnit(frag)
+		if len(ftoks) > maxUnitPlaceholders {
+			t.Errorf("fragment %q holds %d placeholders, want <=%d",
+				frag, len(ftoks), maxUnitPlaceholders)
+		}
+		if i > 0 {
+			rebuilt.WriteString(" ")
+		}
+		rebuilt.WriteString(frag)
+	}
+	orig := strings.Join(strings.Fields(line), " ")
+	if strings.Join(strings.Fields(rebuilt.String()), " ") != orig {
+		t.Errorf("fragments do not reassemble:\n got %q\nwant %q", rebuilt.String(), orig)
+	}
+}
+
+func TestRawSplitPoint(t *testing.T) {
+	s := "First part. Second `code` part. Third."
+	if !rawSplitPoint(s, 10) {
+		t.Error("plain sentence end should split")
+	}
+	// Dot inside a backtick span (e.g. `0.x`) must not split.
+	dotted := "run `0.x` now. Done."
+	dotInside := strings.Index(dotted, "0.")
+	if rawSplitPoint(dotted, dotInside) {
+		t.Error("dot inside backticks must not split")
+	}
+	// Dot of "0.2.x" outside backticks but mid-number must not split.
+	num := "versions 0.2.x here. Done."
+	dotNum := strings.Index(num, "0.2")
+	if rawSplitPoint(num, dotNum) {
+		t.Error("dot inside a number must not split")
+	}
+	// A real sentence end with text after it splits.
+	if !rawSplitPoint(num, strings.Index(num, "here.")+4) {
+		t.Error("sentence end must split")
+	}
+}

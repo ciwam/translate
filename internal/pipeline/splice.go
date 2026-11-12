@@ -73,6 +73,54 @@ func translateSplice(sp spliceParams) Result {
 		}
 		return id
 	}
+	// splitAtSentences adds text as translation units, splitting it at
+	// sentence boundaries until every fragment re-masks to at most
+	// maxUnitPlaceholders placeholders. Falls back to the whole text when
+	// no clean sentence split exists. Units with many placeholders defeat
+	// small models: they DROP middle placeholders deterministically (runs:
+	// [[2]] swallowed by three separate replies; `0.x` split into two
+	// placeholders). Splitting runs on the raw text because in masked form
+	// sentence marks live INSIDE placeholders ("APIs." -> [[1]]) and no
+	// split point would survive.
+	splitAtSentences := func(text string) []int {
+		var build func(string) []int
+		build = func(s string) []int {
+			_, toks, _ := MaskUnit(s)
+			if len(toks) <= maxUnitPlaceholders {
+				return []int{addUnit(s)}
+			}
+			mid := len(s) / 2
+			best := -1
+			bestDist := len(s) + 1
+			for i := 0; i < len(s); i++ {
+				if !rawSplitPoint(s, i) {
+					continue
+				}
+				// The mark STAYS with the left fragment (split after it).
+				left := strings.TrimRight(s[:i+1], " ")
+				right := strings.TrimLeft(s[i+1:], " ")
+				if left == "" || right == "" {
+					continue
+				}
+				d := i - mid
+				if d < 0 {
+					d = -d
+				}
+				if d < bestDist {
+					bestDist = d
+					best = i
+				}
+			}
+			if best < 0 {
+				return []int{addUnit(s)} // no clean split: keep as one unit
+			}
+			out := []int{}
+			out = append(out, build(strings.TrimRight(s[:best+1], " "))...)
+			out = append(out, build(strings.TrimLeft(s[best+1:], " "))...)
+			return out
+		}
+		return build(text)
+	}
 	for _, vl := range vlines {
 		if !vl.hasProse {
 			lineUnits = append(lineUnits, nil)
@@ -80,10 +128,10 @@ func translateSplice(sp spliceParams) Result {
 		}
 		var units []int
 		if len(vl.text) <= contextBudget {
-			units = append(units, addUnit(vl.text))
+			units = splitAtSentences(vl.text)
 		} else {
 			for _, p := range SplitPieces(vl.text, contextBudget) {
-				units = append(units, addUnit(p.Text))
+				units = append(units, splitAtSentences(p.Text)...)
 			}
 		}
 		lineUnits = append(lineUnits, units)
@@ -350,6 +398,46 @@ func translateSplice(sp spliceParams) Result {
 		}
 	}
 	return spliceResult(sp, vlines, uniqTranslations, lineUnits, translatedCount, len(uniq))
+}
+
+// maxUnitPlaceholders bounds how many masked placeholders one translation
+// unit may carry. Small models deterministically drop middle placeholders
+// on placeholder-dense lines; three or fewer survives reliably.
+const maxUnitPlaceholders = 3
+
+// rawSplitPoint reports whether position i in RAW (unmasked) text is a
+// safe sentence split. Primary marks: . ! ? (and CJK 。！？) followed by
+// whitespace, ')' or end of text. Secondary marks: , ; (and CJK ，；) —
+// used only by the caller when no primary split bounded the placeholders.
+// A mark inside a backtick code span never splits (a dot inside `0.x` or
+// a path would corrupt a technical token).
+func rawSplitPoint(s string, i int) bool {
+	// Not inside backticks: count them before i; odd means inside.
+	if strings.Count(s[:i], "`")%2 != 0 {
+		return false
+	}
+	switch s[i] {
+	case '.', '!', '?', ',', ';':
+		// Require whitespace, ')' or end of text after the mark so dotted
+		// numbers/identifiers ("0.2.x", "file.md") never split.
+		j := i + 1
+		if j < len(s) && s[j] != ' ' && s[j] != '\t' && s[j] != ')' {
+			return false
+		}
+		return true
+	default:
+		// CJK sentence/comma marks are 3-byte UTF-8 (E3 80 82 / EF BC 81 /
+		// EF BC 9F / EF BC 8C / EF BC 9B); check their lead bytes.
+		if i+2 < len(s) {
+			c0, c1, c2 := s[i], s[i+1], s[i+2]
+			if c0 == 0xE3 && c1 == 0x80 && c2 == 0x82 ||
+				c0 == 0xEF && c1 == 0xBC && (c2 == 0x81 || c2 == 0x9F || c2 == 0x8C || c2 == 0x9B) {
+				j := i + 3
+				return j >= len(s) || s[j] == ' ' || s[j] == '\t' || s[j] == ')'
+			}
+		}
+		return false
+	}
 }
 
 // isPureASCII reports whether s holds only printable ASCII and whitespace —
