@@ -26,9 +26,9 @@ func (a *app) logView(c *ui.Context) {
 	ui.Scroll(c).TrackScroll(&a.logScroll).Grow(1).Children(func() {
 		ui.Column(c).Fill().Children(func() {
 			if text == "" {
-				ui.Text(c, "暂无日志 — 翻译一次后这里会显示完整流程").FontSize(12).TextColor(t.TextMuted)
+				ui.Text(c, "暂无日志 — 翻译一次后这里会显示完整流程").FontSize(12).TextColor(t.TextMuted).LineHeight(1.5)
 			} else {
-				ui.Text(c, text)
+				ui.Text(c, text).FontSize(12).LineHeight(1.5)
 			}
 		})
 	})

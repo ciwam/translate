@@ -209,7 +209,8 @@ func (a *app) mainContent(c *ui.Context, t *ui.Theme) {
 	// Debounce: schedule a frame for when auto-translate should fire, then
 	// start the translation on that frame. Arms on source edits; a new edit
 	// before the delay re-arms.
-	if ui.TextArea(c, &a.source).Placeholder("输入要翻译的文本…").Height(110).Changed() {
+	if ui.TextArea(c, &a.source).Placeholder("输入要翻译的文本…").Height(110).
+		FontSize(13).LineHeight(1.5).Changed() {
 		a.lastEditAt = time.Now()
 		a.editArmed = true
 		c.After(autoTranslateDelay)
@@ -244,14 +245,15 @@ func (a *app) mainContent(c *ui.Context, t *ui.Theme) {
 		ui.Text(c, "").Grow(1)
 	})
 
-	// Result card (grows, streams, follows the bottom).
+	// Result card (grows, streams, follows the bottom). Comfortable reading:
+	// 14px with 1.6 line height, close to native macOS reading text.
 	ui.Scroll(c).TrackScroll(&a.resultScroll).Grow(1).Children(func() {
 		ui.Column(c).Fill().Children(func() {
 			out := a.output
 			if out == "" && a.phase == 0 {
-				ui.Text(c, "译文会显示在这里").FontSize(13).TextColor(t.TextMuted)
+				ui.Text(c, "译文会显示在这里").FontSize(13).TextColor(t.TextMuted).LineHeight(1.6)
 			} else {
-				ui.Text(c, out).FontSize(13)
+				ui.Text(c, out).FontSize(14).LineHeight(1.6)
 			}
 		})
 	})
