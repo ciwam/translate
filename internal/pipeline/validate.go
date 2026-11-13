@@ -66,6 +66,51 @@ func StripEdgePunct(tok string) string {
 // punctuation width ("8080." vs "8080。") still counts as preserved.
 // Port of protected_tokens_preserved (translator.cpp:526).
 func ProtectedTokensPreserved(src, out string) bool {
+	return protectedTokensPreservedMode(src, out, false)
+}
+
+// ProtectedTokensPreservedLoose is the tolerant variant for the MT wire
+// path. Translation-specialized models naturally drift inside tokens:
+// case flips ("handle.Focused(c)" -> "handlefocused(c)"), plural stripping
+// ("APIs" -> "API"), and hyphen-suffix splits ("MyGo-specific" -> "MyGo").
+// A token counts as preserved when the output contains it modulo case, a
+// trailing plural 's', or a hyphenated suffix. Exact matching remains the
+// rule for the masked protocol, where the model promised verbatim copies.
+func ProtectedTokensPreservedLoose(src, out string) bool {
+	return protectedTokensPreservedMode(src, out, true)
+}
+
+// tokenVariants enumerates the tolerated spellings of a token: itself
+// lowercased, without a trailing plural 's', its hyphen/underscore/dot head,
+// and — for slash-joined chains ("A()/B()/C()") — each slash-separated part
+// (the model may rejoin them with Chinese enumeration commas).
+func tokenVariants(tok string) []string {
+	low := strings.ToLower(tok)
+	variants := []string{low}
+	if strings.HasSuffix(low, "s") && len(low) > 3 {
+		variants = append(variants, low[:len(low)-1])
+	}
+	for _, sep := range []string{"-", "_", "."} {
+		if idx := strings.Index(low, sep); idx > 0 {
+			variants = append(variants, low[:idx])
+		}
+	}
+	if strings.Contains(low, "/") {
+		for _, part := range strings.Split(low, "/") {
+			part = strings.Trim(part, ".,;:!?()[]'\"`")
+			if len(part) >= 4 {
+				variants = append(variants, part)
+			}
+		}
+	}
+	return variants
+}
+
+func protectedTokensPreservedMode(src, out string, looseCase bool) bool {
+	cmpOut := out
+	if looseCase {
+		cmpOut = strings.ToLower(out)
+	}
 	i, n := 0, len(src)
 	for i < n {
 		for i < n && (src[i] == ' ' || src[i] == '\t' || src[i] == '\r' || src[i] == '\n') {
@@ -82,12 +127,28 @@ func ProtectedTokensPreserved(src, out string) bool {
 		if !IsProtectedToken(tok) {
 			continue
 		}
-		if strings.Contains(out, tok) {
+		needle := tok
+		if looseCase {
+			needle = strings.ToLower(tok)
+		}
+		if strings.Contains(cmpOut, needle) {
 			continue
 		}
-		core := StripEdgePunct(tok)
-		if core != "" && strings.Contains(out, core) {
+		core := StripEdgePunct(needle)
+		if core != "" && strings.Contains(cmpOut, core) {
 			continue
+		}
+		if looseCase {
+			matched := false
+			for _, v := range tokenVariants(needle) {
+				if v != "" && strings.Contains(cmpOut, v) {
+					matched = true
+					break
+				}
+			}
+			if matched {
+				continue
+			}
 		}
 		return false
 	}

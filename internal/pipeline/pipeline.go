@@ -128,6 +128,13 @@ func Translate(ctx context.Context, opts Options, text string, adapter provider.
 	// Strengthen the prompt against the two known failure modes: echoing
 	// the source unchanged (short words/phrases), and emitting Traditional
 	// Chinese for a Simplified-Chinese target.
+	//
+	// MT-style providers (Hunyuan-MT) take NO system prompt per their
+	// docs: the instruction is the official user-message template
+	// "把下面的文本翻译成<lang>，不要额外解释。" and all pipeline
+	// requirements ride along after it. The pipeline keeps its own
+	// placeholder/format constraints there too.
+	mtStyle := provider.PromptStyle(provider.Provider(opts.Provider)) == "mt"
 	var targetName, constraints string
 	if tIdx == Chinese {
 		targetName = "Mainland China Simplified Chinese " +
@@ -136,6 +143,14 @@ func Translate(ctx context.Context, opts Options, text string, adapter provider.
 			"characters. Do NOT use traditional Chinese characters."
 	} else {
 		targetName = promptNames[tIdx]
+	}
+	if mtStyle {
+		targetName = provider.MTTargetName(provider.Target(tIdx))
+		constraints = "" // 集成进中文模板本身
+	}
+	mtPreamble := ""
+	if mtStyle {
+		mtPreamble = "把下面的文本翻译成" + targetName + "，不要额外解释。"
 	}
 
 	filter := filters[pIdx]
@@ -169,17 +184,30 @@ func Translate(ctx context.Context, opts Options, text string, adapter provider.
 		}
 	}
 	if !hasTech {
-		systemPrompt := "You are a professional translator. Translate the user's text " +
-			"exactly into the requested target language, in natural, fluent " +
-			"phrasing. Always provide a translation; never echo or return the " +
-			"original text unchanged. " +
-			"Preserve verbatim every non-language token exactly as written: " +
-			"numbers, percent signs, brackets, file paths, code identifiers, " +
-			"URLs, and command names. Never reword, reorder, drop, or recompute " +
-			"them. Keep the exact line structure and translate the text " +
-			"completely without truncating or omitting any line. Output only the " +
-			"translated text, with no explanations, notes, examples, or " +
-			"quotation marks. " + constraints + glossaryBlock
+		// MT style: one user-message request in the official template;
+		// the pipeline's must-keep-token rules follow. System prompt stays
+		// empty (the model is trained without one).
+		var proseSystem, proseUser string
+		if mtStyle {
+			proseSystem = ""
+			proseUser = "把下面的文本翻译成" + targetName + "，不要额外解释。" +
+				"逐字保留数字、百分号、括号、文件路径、代码标识符、URL 和命令名，" +
+				"保持行结构完全一致，不要遗漏任何一行。" + glossaryBlock + "\n\n" + src
+		} else {
+			proseSystem = "You are a professional translator. Translate the user's text " +
+				"exactly into the requested target language, in natural, fluent " +
+				"phrasing. Always provide a translation; never echo or return the " +
+				"original text unchanged. " +
+				"Preserve verbatim every non-language token exactly as written: " +
+				"numbers, percent signs, brackets, file paths, code identifiers, " +
+				"URLs, and command names. Never reword, reorder, drop, or recompute " +
+				"them. Keep the exact line structure and translate the text " +
+				"completely without truncating or omitting any line. Output only the " +
+				"translated text, with no explanations, notes, examples, or " +
+				"quotation marks. " + constraints + glossaryBlock
+			proseUser = "Translate the following text into " + targetName +
+				". Provide only the translation:\n\n"
+		}
 		// Chunk over-long prose at line / sentence boundaries so no single
 		// request crosses the context window; translate sequentially and
 		// rejoin with the original separators (deltas stream the running
@@ -195,9 +223,8 @@ func Translate(ctx context.Context, opts Options, text string, adapter provider.
 			for i, p := range pieces {
 				req := provider.Request{
 					APIKey:       key,
-					SystemPrompt: systemPrompt,
-					UserPrompt: "Translate the following text into " + targetName +
-						". Provide only the translation:\n\n" + p.Text,
+					SystemPrompt: proseSystem,
+					UserPrompt:   proseUser + p.Text,
 				}
 				if opts.Log != nil {
 					opts.Log.Debugf("段 %d/%d: %q", i+1, len(pieces), p.Text)
@@ -222,9 +249,8 @@ func Translate(ctx context.Context, opts Options, text string, adapter provider.
 		setRoute("prose")
 		req := provider.Request{
 			APIKey:       key,
-			SystemPrompt: systemPrompt,
-			UserPrompt: "Translate the following text into " + targetName +
-				". Provide only the translation:\n\n" + src,
+			SystemPrompt: proseSystem,
+			UserPrompt:   proseUser + src,
 		}
 		rr := translateWithRetryLog(ctx, adapter, req, func(delta string) {
 			if onDelta != nil {
@@ -259,6 +285,8 @@ func Translate(ctx context.Context, opts Options, text string, adapter provider.
 		setRoute:    setRoute,
 		onDelta:     onDelta,
 		log:         opts.Log,
+		mtStyle:     mtStyle,
+		mtPreamble:  mtPreamble,
 	})
 }
 
@@ -276,6 +304,8 @@ type spliceParams struct {
 	setRoute    func(string)
 	onDelta     func(string)
 	log         *Logger
+	mtStyle     bool
+	mtPreamble  string
 }
 
 // lineInfo mirrors LineInfo (translator.cpp:113).
@@ -338,10 +368,16 @@ func spliceResult(sp spliceParams, vlines []lineInfo, uniqTranslations []string,
 	if sp.filter.Repunct {
 		result = Repunct(result, sp.src)
 	}
-	// Safety net: every technical token must still be present verbatim. The
-	// per-line checks already enforce this; a whole-text miss is a pipeline
-	// bug, and returning untranslated source would hide it.
-	if !ProtectedTokensPreserved(sp.src, result) {
+	// Safety net: every technical token must still be present. The per-line
+	// checks already enforce this; a whole-text miss is a pipeline bug, and
+	// returning untranslated source would hide it. MT style applies the
+	// same loose matching as its per-line check (case drift, plural
+	// stripping, slash-chain respelling).
+	wholeTextOK := ProtectedTokensPreserved(sp.src, result)
+	if !wholeTextOK && sp.mtStyle {
+		wholeTextOK = ProtectedTokensPreservedLoose(sp.src, result)
+	}
+	if !wholeTextOK {
 		sp.setRoute("splice(token-miss, translated " +
 			itoa(translatedCount) + "/" + itoa(uniqCount) + ")")
 		return Result{Error: "翻译失败：译文丢失了源文本中的技术标记，请重试"}
@@ -375,12 +411,23 @@ func runGroupWorkers(sp spliceParams, systemPrompt string, uniq []string, groups
 				block.WriteString(uniq[k])
 				block.WriteByte('\n')
 			}
-			req := provider.Request{
-				APIKey:       sp.key,
-				SystemPrompt: systemPrompt + BuildGlossary(sp.glossary, block.String()),
-				UserPrompt: "Translate each of the following " +
-					itoa(gEnd-g) + " lines into " + sp.targetName +
-					":\n\n" + block.String(),
+			glossary := BuildGlossary(sp.glossary, block.String())
+			var req provider.Request
+			if sp.mtStyle {
+				req = provider.Request{
+					APIKey: sp.key,
+					UserPrompt: sp.mtPreamble + "以下是 " + itoa(gEnd-g) +
+						" 行文本，逐行翻译，输出行数与输入一致。" + glossary +
+						"\n\n" + block.String(),
+				}
+			} else {
+				req = provider.Request{
+					APIKey:       sp.key,
+					SystemPrompt: systemPrompt + glossary,
+					UserPrompt: "Translate each of the following " +
+						itoa(gEnd-g) + " lines into " + sp.targetName +
+						":\n\n" + block.String(),
+				}
 			}
 			if sp.log != nil {
 				sp.log.Infof("组 %d/%d 发起请求（%d 行）", gi+1, groups, gEnd-g)

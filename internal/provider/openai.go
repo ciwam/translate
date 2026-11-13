@@ -17,6 +17,12 @@ type endpointInfo struct {
 	Endpoint    string
 	Model       string
 	DisplayName string
+	// PromptStyle selects how the pipeline phrases requests. "mt" models
+	// are translation-specialized (Hunyuan-MT): per their docs they take
+	// no system prompt — instructions belong in the user message, in the
+	// official template "把下面的文本翻译成<lang>，不要额外解释。".
+	// "" is the general instruct style (system+user).
+	PromptStyle string
 }
 
 // Keep in sync with the Provider enum (Zhipu=0, SiliconFlow=1, Hunyuan=2).
@@ -35,7 +41,41 @@ var endpoints = []endpointInfo{
 		Endpoint:    "https://api.siliconflow.cn/v1/chat/completions",
 		Model:       "tencent/Hunyuan-MT-7B",
 		DisplayName: "SiliconFlow · Hunyuan-MT-7B",
+		PromptStyle: "mt",
 	},
+}
+
+// PromptStyle returns how a provider's requests should be phrased:
+// "" (general instruct) or "mt" (translation-specialized, user-message
+// template).
+func PromptStyle(p Provider) string {
+	idx := int(p)
+	if idx < 0 || idx >= len(endpoints) {
+		idx = 0
+	}
+	return endpoints[idx].PromptStyle
+}
+
+// MTTargetName maps a pipeline Target to the language name Hunyuan-MT's
+// official template expects.
+func MTTargetName(t Target) string {
+	switch t {
+	case English:
+		return "英文"
+	case Chinese:
+		return "简体中文"
+	case Japanese:
+		return "日文"
+	case Korean:
+		return "韩文"
+	case French:
+		return "法文"
+	case German:
+		return "德文"
+	case Spanish:
+		return "西班牙文"
+	}
+	return "简体中文"
 }
 
 // Adaptive total-operation timeout: base allowance plus per-KB headroom

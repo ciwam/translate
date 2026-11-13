@@ -138,30 +138,49 @@ func translateSplice(sp spliceParams) Result {
 		lineUnits = append(lineUnits, units)
 	}
 
-	systemPrompt := "You are a professional translator for software developers. The user's " +
-		"text contains log, terminal, or documentation lines. Numbered " +
-		"placeholders like [[1]] stand in for technical tokens (file paths, " +
-		"code identifiers, commands, flags, numbers, timestamps, error codes): " +
-		"copy every placeholder EXACTLY as written, in the position where its " +
-		"content belongs, and translate only the natural-language parts into " +
-		"the requested target language. Output exactly one translated line per " +
-		"input line, in the same order. Your reply MUST contain exactly the " +
-		"same number of lines as the input: never merge two input lines into " +
-		"one, never split one input line across two output lines, never reflow " +
-		"or wrap a long line, never add or drop a line break. Never translate, " +
-		"renumber, or drop placeholders; output only the translations, without " +
-		"numbering or added explanation."
-	// Worked examples in the SAME masked form the model actually sees —
-	// small models (GLM-4-Flash / Qwen-7B) follow examples far better than
-	// abstract rules.
-	if sp.target == Chinese {
-		systemPrompt += " Example — input line: \"[[1]] cannot open [[2]] Permission " +
-			"denied\"; output line: \"[[1]] 无法打开 [[2]] 权限被拒绝\". " +
-			"Another example — input line: \"[[1]] Cannot read properties of " +
-			"undefined [[2]] 'map')\"; output line: \"[[1]] 无法读取未定义的" +
-			"属性 [[2]] 'map')\"."
+	// Two prompt styles with different WIRE FORMATS:
+	//
+	// - General instruct models (default): the masked form goes on the wire
+	//   ([[N]] placeholders), the full system prompt teaches the protocol,
+	//   and replies are restored from placeholders.
+	//
+	// - MT models (Hunyuan-MT): per their docs they are pure-text
+	//   translators trained with no system prompt and no placeholder
+	//   concept. Forcing the mask protocol on them degrades both fidelity
+	//   and compliance (runs: invented glosses, bold markers, swallowed
+	//   slots). So MT units go on the wire RAW (unmasked), with the
+	//   official user-message template; correctness is enforced AFTER the
+	//   reply by the same per-line guards (token preservation, bad-language
+	//   checks, CJK presence) — a reply that drops or rewrites a technical
+	//   token is rejected and retried, ultimately under the masked protocol
+	//   as a fallback.
+	systemPrompt := ""
+	if !sp.mtStyle {
+		systemPrompt = "You are a professional translator for software developers. The user's " +
+			"text contains log, terminal, or documentation lines. Numbered " +
+			"placeholders like [[1]] stand in for technical tokens (file paths, " +
+			"code identifiers, commands, flags, numbers, timestamps, error codes): " +
+			"copy every placeholder EXACTLY as written, in the position where its " +
+			"content belongs, and translate only the natural-language parts into " +
+			"the requested target language. Output exactly one translated line per " +
+			"input line, in the same order. Your reply MUST contain exactly the " +
+			"same number of lines as the input: never merge two input lines into " +
+			"one, never split one input line across two output lines, never reflow " +
+			"or wrap a long line, never add or drop a line break. Never translate, " +
+			"renumber, or drop placeholders; output only the translations, without " +
+			"numbering or added explanation."
+		// Worked examples in the SAME masked form the model actually sees —
+		// small models (GLM-4-Flash / Qwen-7B) follow examples far better than
+		// abstract rules.
+		if sp.target == Chinese {
+			systemPrompt += " Example — input line: \"[[1]] cannot open [[2]] Permission " +
+				"denied\"; output line: \"[[1]] 无法打开 [[2]] 权限被拒绝\". " +
+				"Another example — input line: \"[[1]] Cannot read properties of " +
+				"undefined [[2]] 'map')\"; output line: \"[[1]] 无法读取未定义的" +
+				"属性 [[2]] 'map')\"."
+		}
+		systemPrompt += " " + sp.constraints
 	}
-	systemPrompt += " " + sp.constraints
 
 	uniqTranslations := append([]string(nil), uniqOrig...) // default: original
 	uniqTranslated := make([]bool, len(uniq))
@@ -207,7 +226,13 @@ func translateSplice(sp spliceParams) Result {
 	groups := (len(toTranslate) + lineGroupSize - 1) / lineGroupSize
 	groupUniq := make([]string, len(toTranslate))
 	for i, k := range toTranslate {
-		groupUniq[i] = uniq[k]
+		// MT style sends RAW text (no placeholders on the wire); general
+		// instruct sends the masked form.
+		if sp.mtStyle {
+			groupUniq[i] = uniqOrig[k]
+		} else {
+			groupUniq[i] = uniq[k]
+		}
 	}
 
 	groupResults, groupLines := runGroupWorkers(sp, systemPrompt, groupUniq, groups, lineGroupSize)
@@ -219,7 +244,11 @@ func translateSplice(sp spliceParams) Result {
 	// token preservation — plus the two rejections the older guards missed:
 	// the reply echoing the source line, and a CJK target whose reply
 	// contains no CJK character at all.
-	validateLine := func(k int, replyLine string) (string, bool) {
+	// validateWire checks one reply line. wireMasked: the line was sent in
+	// the masked protocol (placeholders on the wire, restore from reply);
+	// false: raw text on the wire (MT style), reply carries the tokens and
+	// is verified by the preservation net.
+	validateWire := func(k int, replyLine string, wireMasked bool) (string, bool) {
 		reject := func(reason string) (string, bool) {
 			if log != nil {
 				log.Warnf("单元 #%d 校验拒绝（%s）: 回复 %q", k, reason, strings.Trim(replyLine, " \t\r\n"))
@@ -264,9 +293,9 @@ func translateSplice(sp spliceParams) Result {
 		var candidate string
 		var okLine bool
 		var reason string
-		if uniqMasked[k] {
-			// Masked unit: restore [[N]] placeholders verbatim; any
-			// missing/malformed placeholder fails the whole line.
+		if wireMasked && uniqMasked[k] {
+			// Masked protocol: restore [[N]] placeholders verbatim; any
+			// missing/malformed placeholder fails the line.
 			candidate, okLine = RestoreUnit(replyLine, uniqTokens[k])
 			if okLine {
 				candidate = Repunct(candidate, orig)
@@ -278,11 +307,17 @@ func translateSplice(sp spliceParams) Result {
 				reason = "占位符恢复失败（缺失/畸形）"
 			}
 		} else {
-			// Unmasked unit (no protected tokens): punctuation
-			// normalization + quality guard + verbatim check.
+			// Raw protocol (MT style, or an unmasked unit): punctuation
+			// normalization + quality guard + verbatim token check. The MT
+			// check is case-insensitive — translation models render tokens
+			// with natural case drift ("handle.Focused(c)" ->
+			// "handlefocused(c)"), and a case flip is not a loss.
 			candidate = Repunct(replyLine, uniqOrig[k])
 			bad := IsBadTranslation(candidate)
 			kept := ProtectedTokensPreserved(uniqOrig[k], candidate)
+			if !kept && sp.mtStyle {
+				kept = ProtectedTokensPreservedLoose(uniqOrig[k], candidate)
+			}
 			okLine = !bad && kept
 			switch {
 			case bad:
@@ -311,6 +346,11 @@ func translateSplice(sp spliceParams) Result {
 			return candidate, true
 		}
 		return reject(reason)
+	}
+	// validateLine keeps the historical signature for the group triage:
+	// the wire form is masked for general instruct, raw for MT.
+	validateLine := func(k int, replyLine string) (string, bool) {
+		return validateWire(k, replyLine, !sp.mtStyle)
 	}
 
 	// Group triage: a count mismatch (merged/split/wrapped lines) fails the
@@ -396,25 +436,55 @@ func translateSplice(sp spliceParams) Result {
 			wg.Add(1)
 			go func(k int) {
 				defer wg.Done()
-				system := systemPrompt + BuildGlossary(sp.glossary, uniq[k])
-				if uniqMasked[k] {
-					var list strings.Builder
-					for i, tok := range uniqTokens[k] {
-						if i > 0 {
-							list.WriteString(", ")
+				glossary := BuildGlossary(sp.glossary, uniqOrig[k])
+				// MT style round plan: 1 = RAW text with the official
+				// template (best prose), 2 = masked protocol (structure
+				// forces tokens), 3 = RAW again with explicit keep-token
+				// wording (models miss stochastically; a third raw chance
+				// often lands). General instruct: masked every round.
+				general := !sp.mtStyle || round >= 2 && round != 3
+				var req provider.Request
+				if sp.mtStyle && !general {
+					stress := ""
+					if round >= 3 && uniqMasked[k] && len(uniqTokens[k]) > 0 {
+						var list strings.Builder
+						for i, tok := range uniqTokens[k] {
+							if i > 0 {
+								list.WriteString("、")
+							}
+							list.WriteString(tok)
 						}
-						list.WriteString("[[" + itoa(i+1) + "]]=" + tok)
+						stress = "特别注意：以下技术记号必须原样出现在译文中，不得翻译、改写、增删或加注：" +
+							list.String() + "。"
 					}
-					system += " The input contains exactly " + itoa(len(uniqTokens[k])) +
-						" placeholders: " + list.String() +
-						". Your reply MUST contain every one of these placeholders EXACTLY once, and NO other [[N]] placeholder."
-				}
-				req := provider.Request{
-					APIKey:       sp.key,
-					SystemPrompt: system,
-					UserPrompt: "Translate the following single line into " +
-						sp.targetName + ". Output only the translation:\n\n" +
-						uniq[k] + "\n",
+					req = provider.Request{
+						APIKey: sp.key,
+						UserPrompt: sp.mtPreamble +
+							"逐字保留数字、百分号、括号、文件路径、代码标识符、URL、命令名，不要改写、增删或加注。" +
+							stress + glossary + "\n\n" + uniqOrig[k] + "\n",
+					}
+				} else {
+					// Masked protocol (general instruct always; MT round 2+).
+					rules := systemPrompt + glossary
+					if uniqMasked[k] {
+						var list strings.Builder
+						for i, tok := range uniqTokens[k] {
+							if i > 0 {
+								list.WriteString(", ")
+							}
+							list.WriteString("[[" + itoa(i+1) + "]]=" + tok)
+						}
+						rules += " The input contains exactly " + itoa(len(uniqTokens[k])) +
+							" placeholders: " + list.String() +
+							". Your reply MUST contain every one of these placeholders EXACTLY once, and NO other [[N]] placeholder."
+					}
+					req = provider.Request{
+						APIKey:       sp.key,
+						SystemPrompt: rules,
+						UserPrompt: "Translate the following single line into " +
+							sp.targetName + ". Output only the translation:\n\n" +
+							uniq[k] + "\n",
+					}
 				}
 				sem <- struct{}{}
 				rr := translateWithRetryLog(sp.ctx, sp.adapter, req, nil, log)
@@ -435,7 +505,10 @@ func translateSplice(sp spliceParams) Result {
 					}
 					joined.WriteString(l)
 				}
-				if candidate, ok := validateLine(k, joined.String()); ok {
+				// Wire form of THIS request: general instruct always masked;
+				// MT raw in round 1, masked (escalation) in round 2+.
+				wireMasked := !sp.mtStyle || (round >= 2 && round != 3)
+				if candidate, ok := validateWire(k, joined.String(), wireMasked); ok {
 					mu.Lock()
 					uniqTranslations[k] = candidate
 					uniqTranslated[k] = true
@@ -450,6 +523,7 @@ func translateSplice(sp spliceParams) Result {
 	}
 	rescue(1)
 	rescue(2)
+	rescue(3)
 
 	// Fail loudly instead of returning a mixed translated/English result:
 	// after group attempts and per-line rescue, any surviving untranslated
