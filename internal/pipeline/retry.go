@@ -55,10 +55,13 @@ func translateWithRetryLog(ctx context.Context, adapter provider.Translator, req
 		cancel()
 		throttle := strings.Contains(r.Error, "API 限流")
 		hardError := strings.Contains(r.Error, "API 错误")
-		retryable := !r.OK && (throttle || !hardError) && attempt < maxAttempts-1
+		quota := provider.IsQuotaExhaustedError(r.Error)
+		retryable := !r.OK && !quota && (throttle || !hardError) && attempt < maxAttempts-1
 		if log != nil {
 			if r.OK {
 				log.Debugf("请求成功（第 %d 次尝试）", attempt+1)
+			} else if quota {
+				log.Errorf("免费额度已用尽（第 %d 次尝试），不再重试: %s", attempt+1, r.Error)
 			} else if retryable {
 				log.Warnf("请求失败（第 %d 次尝试，可重试）: %s", attempt+1, r.Error)
 			} else {

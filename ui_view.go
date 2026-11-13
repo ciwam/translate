@@ -45,6 +45,12 @@ type app struct {
 	// settings dialog
 	showSettings bool
 
+	// quota exhausted: once the provider reports the free-tier allowance is
+	// used up, auto-translate stops calling the model and a modal explains;
+	// the user re-arms via the modal's 重试 button.
+	quotaExhausted bool
+	showQuotaAlert bool
+
 	// panel edit-in-progress keys, keyed by provider index. Switching the
 	// model moves the field's text to the provider it belongs to.
 	panelKeys       map[int]string
@@ -80,6 +86,13 @@ func (a *app) translateFromView() {
 	if src == "" {
 		a.output = ""
 		a.status = ""
+		return
+	}
+	// Quota gate: once the provider reported the free allowance as used up,
+	// stop calling the model and surface the modal again.
+	if a.quotaExhausted {
+		a.status = "免费额度已用完，未调用模型"
+		a.showQuotaAlert = true
 		return
 	}
 	a.generation++
@@ -129,10 +142,42 @@ func (a *app) translateFromView() {
 				a.status = "完成 · " + route
 			} else {
 				a.status = res.Error
+				// Free-tier exhaustion: trip the gate so subsequent
+				// auto-translations stop calling the model.
+				if provider.IsQuotaExhaustedError(res.Error) {
+					a.quotaExhausted = true
+					a.showQuotaAlert = true
+				}
 			}
 			win.Invalidate()
 		})
 	}()
+}
+
+// quotaAlertView shows the free-quota-exhausted dialog with a re-arm
+// button: 重试 clears the gate (the next translation calls the model
+// again — the allowance may have reset, or the user switched models).
+func (a *app) quotaAlertView(c *ui.Context) {
+	if !a.showQuotaAlert {
+		return
+	}
+	if ui.Modal(c, &a.showQuotaAlert, func() {
+		ui.Column(c).Gap(10).Padding(16).Width(380).Children(func() {
+			ui.Text(c, "免费额度已用完").Bold()
+			ui.Text(c, a.status).FontSize(12)
+			ui.Text(c, "已停止调用模型翻译。免费额度通常按天重置；你也可以在设置中切换其他模型。").FontSize(12)
+			ui.Row(c).Gap(8).Justify(ui.End).Children(func() {
+				if ui.PrimaryButton(c, "重试").Clicked() {
+					a.quotaExhausted = false
+					a.showQuotaAlert = false
+					c.Invalidate()
+				}
+			})
+		})
+	}).Dismissed() {
+		// Click outside/Escape closes the dialog; the gate stays armed so
+		// auto-translate keeps skipping model calls.
+	}
 }
 
 const maxFloat32 = float32(3.4028235e38)
@@ -150,6 +195,7 @@ func (a *app) view(c *ui.Context) {
 	})
 
 	a.settingsView(c)
+	a.quotaAlertView(c)
 }
 
 func (a *app) mainContent(c *ui.Context, t *ui.Theme) {

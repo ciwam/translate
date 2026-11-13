@@ -104,6 +104,27 @@ func isThrottle(status int, msg string) bool {
 	return false
 }
 
+// IsQuotaExhaustedError reports whether a pipeline error string means the
+// provider's free-tier quota (per-model daily/requested allowance) is used
+// up — as opposed to a momentary rate limit, which retrying fixes. Silicon-
+// Flow has no balance API (v1/user/info is deprecated), so exhaustion is
+// detected from the chat call's own 429 payload wording.
+func IsQuotaExhaustedError(err string) bool {
+	if err == "" {
+		return false
+	}
+	lower := strings.ToLower(err)
+	for _, kw := range []string{
+		"quota", "额度", "配额", "免费额度", "daily limit",
+		"resource budget", "balance", "余额不足", "已用完", "用尽",
+	} {
+		if strings.Contains(lower, kw) {
+			return true
+		}
+	}
+	return false
+}
+
 type chatRequest struct {
 	Model       string        `json:"model"`
 	Messages    []chatMessage `json:"messages"`
