@@ -163,16 +163,54 @@ func translateSplice(sp spliceParams) Result {
 	}
 	systemPrompt += " " + sp.constraints
 
-	// Translate the unique lines in small groups, with bounded parallelism.
-	// 3 lines per group: smaller groups align far more reliably (the model
-	// merges/splits lines on longer groups, forcing whole-group rescue),
-	// and with 4-way parallelism the extra requests don't cost wall time.
-	const lineGroupSize = 3
-	groups := (len(uniq) + lineGroupSize - 1) / lineGroupSize
 	uniqTranslations := append([]string(nil), uniqOrig...) // default: original
 	uniqTranslated := make([]bool, len(uniq))
 
-	groupResults, groupLines := runGroupWorkers(sp, systemPrompt, uniq, groups, lineGroupSize)
+	// Local pre-pass: units with nothing translatable are resolved in
+	// process and never sent to the model — pure-symbol lines, key:value
+	// entries with identifier values, glue-only fragments ("and [[1]] go
+	// test [[2]]"), and fragments whose every prose word already matches
+	// the target language. Each skipped unit is one fewer line in the
+	// group requests, so groups also align more easily.
+	untranslated := 0
+	for k := 0; k < len(uniq); k++ {
+		orig := uniqOrig[k]
+		switch {
+		case isLetterless(orig), isTechValueLine(orig),
+			hasNoTranslatableContent(orig):
+			uniqTranslations[k] = orig
+			uniqTranslated[k] = true
+			if log != nil {
+				log.Infof("单元 #%d 无可译内容，本地放行（不请求模型）", k)
+			}
+		default:
+			untranslated++
+		}
+	}
+	if log != nil {
+		log.Infof("本地放行 %d 个单元，%d 个交由模型翻译", len(uniq)-untranslated, untranslated)
+	}
+
+	// Translate the model-bound units in small groups, with bounded
+	// parallelism. 3 lines per group: smaller groups align far more
+	// reliably (the model merges/splits lines on longer groups, forcing
+	// whole-group rescue), and with 4-way parallelism the extra requests
+	// don't cost wall time. Groups index into toTranslate; group triage
+	// and rescue below map their positions back to uniq ids.
+	var toTranslate []int
+	for k := 0; k < len(uniq); k++ {
+		if !uniqTranslated[k] {
+			toTranslate = append(toTranslate, k)
+		}
+	}
+	const lineGroupSize = 3
+	groups := (len(toTranslate) + lineGroupSize - 1) / lineGroupSize
+	groupUniq := make([]string, len(toTranslate))
+	for i, k := range toTranslate {
+		groupUniq[i] = uniq[k]
+	}
+
+	groupResults, groupLines := runGroupWorkers(sp, systemPrompt, groupUniq, groups, lineGroupSize)
 
 	wantCJK := sp.target == Chinese || sp.target == 2 || sp.target == 3 // zh/ja/ko
 
@@ -291,8 +329,8 @@ func translateSplice(sp spliceParams) Result {
 		okGroups++
 		g := gi * lineGroupSize
 		gEnd := g + lineGroupSize
-		if gEnd > len(uniq) {
-			gEnd = len(uniq)
+		if gEnd > len(toTranslate) {
+			gEnd = len(toTranslate)
 		}
 		tr := groupLines[gi]
 		// Drop empty lines so a leading/trailing blank line does not break
@@ -310,8 +348,9 @@ func translateSplice(sp spliceParams) Result {
 			}
 			continue
 		}
-		for k := g; k < gEnd; k++ {
-			if candidate, ok := validateLine(k, filtered[k-g]); ok {
+		for pos := g; pos < gEnd; pos++ {
+			k := toTranslate[pos] // group position -> uniq id
+			if candidate, ok := validateLine(k, filtered[pos-g]); ok {
 				uniqTranslations[k] = candidate
 				uniqTranslated[k] = true
 			}

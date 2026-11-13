@@ -107,7 +107,6 @@ func main() {
 	}
 	if verbose || os.Getenv("TRANSLATE_VERBOSE") == "1" {
 		log = pipeline.NewLogger()
-		defer func() { fmt.Fprint(os.Stderr, log.Render()) }()
 	}
 	adapter := provider.New(provider.Provider(prov))
 	res := pipeline.Translate(context.Background(), pipeline.Options{
@@ -130,6 +129,9 @@ func main() {
 	}
 	out, _ := json.Marshal(resp)
 	fmt.Println(string(out))
+	if verbose || os.Getenv("TRANSLATE_VERBOSE") == "1" {
+		fmt.Fprint(os.Stderr, log.Render())
+	}
 	if !res.OK {
 		os.Exit(1)
 	}
