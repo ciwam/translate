@@ -414,11 +414,16 @@ func runGroupWorkers(sp spliceParams, systemPrompt string, uniq []string, groups
 			glossary := BuildGlossary(sp.glossary, block.String())
 			var req provider.Request
 			if sp.mtStyle {
+				// Group requests carry the keep-verbatim rules inline: MT
+				// models (run: Hunyuan translated a quoted error message
+				// into Chinese) need them in EVERY request, not just rescue.
 				req = provider.Request{
 					APIKey: sp.key,
 					UserPrompt: sp.mtPreamble + "以下是 " + itoa(gEnd-g) +
-						" 行文本，逐行翻译，输出行数与输入一致。" + glossary +
-						"\n\n" + block.String(),
+						" 行文本，逐行翻译，输出行数与输入一致。" +
+						"逐字保留数字、百分号、括号、文件路径、代码标识符、URL、命令名。" +
+						"英文双引号括起来的内容（JSON 字段、错误信息）必须原样保留，不要翻译其中任何内容。" +
+						glossary + "\n\n" + block.String(),
 				}
 			} else {
 				req = provider.Request{

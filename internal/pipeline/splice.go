@@ -445,8 +445,14 @@ func translateSplice(sp spliceParams) Result {
 				general := !sp.mtStyle || round >= 2 && round != 3
 				var req provider.Request
 				if sp.mtStyle && !general {
+					// Stress list from round 1: MT models (run: Hunyuan
+					// translated a quoted error message into Chinese)
+					// preserve tokens better when they are named up front.
+					// Quoted strings (JSON fields, error messages) are named
+					// as untouchable wholesale — translating their contents
+					// destroys log semantics.
 					stress := ""
-					if round >= 3 && uniqMasked[k] && len(uniqTokens[k]) > 0 {
+					if uniqMasked[k] && len(uniqTokens[k]) > 0 {
 						var list strings.Builder
 						for i, tok := range uniqTokens[k] {
 							if i > 0 {
@@ -456,6 +462,9 @@ func translateSplice(sp spliceParams) Result {
 						}
 						stress = "特别注意：以下技术记号必须原样出现在译文中，不得翻译、改写、增删或加注：" +
 							list.String() + "。"
+					}
+					if strings.Contains(uniqOrig[k], "\"") {
+						stress += "英文双引号括起来的内容（JSON 字段、错误信息）必须原样保留，不要翻译其中任何内容。"
 					}
 					req = provider.Request{
 						APIKey: sp.key,
