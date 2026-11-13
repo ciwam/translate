@@ -41,7 +41,7 @@ import (
 )
 
 var targetCodes = []string{"en", "zh", "ja", "ko", "fr", "de", "es"}
-var providerNames = []string{"zhipu", "siliconflow"}
+var providerNames = []string{"zhipu", "siliconflow", "hunyuan-mt"}
 
 type request struct {
 	Provider any    `json:"provider"`
@@ -144,7 +144,7 @@ func parseProvider(v any) (int, error) {
 	case float64:
 		i := int(t)
 		if i < 0 || i >= len(providerNames) {
-			return 0, fmt.Errorf("provider 越界（0=Zhipu, 1=SiliconFlow）")
+			return 0, fmt.Errorf("provider 越界（0=Zhipu, 1=SiliconFlow, 2=HunyuanMT）")
 		}
 		return i, nil
 	case string:

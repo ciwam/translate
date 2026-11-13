@@ -22,6 +22,7 @@ type filterConfig struct {
 var filters = []filterConfig{
 	{true, true, true}, // Zhipu · GLM-4-Flash
 	{true, true, true}, // SiliconFlow · Qwen2.5-7B-Instruct
+	{true, true, true}, // SiliconFlow · Hunyuan-MT-7B
 }
 
 var promptNames = []string{
@@ -36,7 +37,7 @@ var promptNames = []string{
 
 var targetCodes = []string{"en", "zh", "ja", "ko", "fr", "de", "es"}
 
-var providerNames = []string{"zhipu", "siliconflow"}
+var providerNames = []string{"zhipu", "siliconflow", "hunyuan-mt"}
 
 // logTargetName is a safe display name for logging.
 func logTargetName(i int) string {

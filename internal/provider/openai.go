@@ -19,7 +19,7 @@ type endpointInfo struct {
 	DisplayName string
 }
 
-// Keep in sync with the Provider enum (Zhipu=0, SiliconFlow=1).
+// Keep in sync with the Provider enum (Zhipu=0, SiliconFlow=1, Hunyuan=2).
 var endpoints = []endpointInfo{
 	{
 		Endpoint:    "https://open.bigmodel.cn/api/paas/v4/chat/completions",
@@ -30,6 +30,11 @@ var endpoints = []endpointInfo{
 		Endpoint:    "https://api.siliconflow.cn/v1/chat/completions",
 		Model:       "Qwen/Qwen2.5-7B-Instruct",
 		DisplayName: "SiliconFlow · Qwen2.5-7B-Instruct",
+	},
+	{
+		Endpoint:    "https://api.siliconflow.cn/v1/chat/completions",
+		Model:       "tencent/Hunyuan-MT-7B",
+		DisplayName: "SiliconFlow · Hunyuan-MT-7B",
 	},
 }
 
