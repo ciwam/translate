@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"strings"
+	"sync"
 
 	"ciwang/translate/internal/provider"
 )
@@ -163,7 +164,10 @@ func translateSplice(sp spliceParams) Result {
 	systemPrompt += " " + sp.constraints
 
 	// Translate the unique lines in small groups, with bounded parallelism.
-	const lineGroupSize = 5
+	// 3 lines per group: smaller groups align far more reliably (the model
+	// merges/splits lines on longer groups, forcing whole-group rescue),
+	// and with 4-way parallelism the extra requests don't cost wall time.
+	const lineGroupSize = 3
 	groups := (len(uniq) + lineGroupSize - 1) / lineGroupSize
 	uniqTranslations := append([]string(nil), uniqOrig...) // default: original
 	uniqTranslated := make([]bool, len(uniq))
@@ -339,58 +343,71 @@ func translateSplice(sp spliceParams) Result {
 		if log != nil && pending > 0 {
 			log.Infof("抢救第 %d 轮：%d 个单元进入逐行重试", round, pending)
 		}
+		// Parallel with the same bounded concurrency as the group phase:
+		// 15 sequential single-line requests were 17s of the 31s run; the
+		// requests are independent (one line in, one line out), so ordering
+		// is irrelevant. Results land in the shared slices via mutex.
+		var mu sync.Mutex
+		var wg sync.WaitGroup
+		sem := make(chan struct{}, maxConcurrent)
 		for k := 0; k < len(uniq); k++ {
 			if uniqTranslated[k] {
 				continue
 			}
-			system := systemPrompt + BuildGlossary(sp.glossary, uniq[k])
-			if uniqMasked[k] {
-				var list strings.Builder
-				for i, tok := range uniqTokens[k] {
-					if i > 0 {
-						list.WriteString(", ")
+			wg.Add(1)
+			go func(k int) {
+				defer wg.Done()
+				system := systemPrompt + BuildGlossary(sp.glossary, uniq[k])
+				if uniqMasked[k] {
+					var list strings.Builder
+					for i, tok := range uniqTokens[k] {
+						if i > 0 {
+							list.WriteString(", ")
+						}
+						list.WriteString("[[" + itoa(i+1) + "]]=" + tok)
 					}
-					list.WriteString("[[" + itoa(i+1) + "]]=" + tok)
+					system += " The input contains exactly " + itoa(len(uniqTokens[k])) +
+						" placeholders: " + list.String() +
+						". Your reply MUST contain every one of these placeholders EXACTLY once, and NO other [[N]] placeholder."
 				}
-				system += " The input contains exactly " + itoa(len(uniqTokens[k])) +
-					" placeholders: " + list.String() +
-					". Your reply MUST contain every one of these placeholders EXACTLY once, and NO other [[N]] placeholder."
-				if log != nil {
-					log.Debugf("单元 #%d 抢救提示含占位符清单（%d 个）", k, len(uniqTokens[k]))
+				req := provider.Request{
+					APIKey:       sp.key,
+					SystemPrompt: system,
+					UserPrompt: "Translate the following single line into " +
+						sp.targetName + ". Output only the translation:\n\n" +
+						uniq[k] + "\n",
 				}
-			}
-			req := provider.Request{
-				APIKey:       sp.key,
-				SystemPrompt: system,
-				UserPrompt: "Translate the following single line into " +
-					sp.targetName + ". Output only the translation:\n\n" +
-					uniq[k] + "\n",
-			}
-			rr := translateWithRetryLog(sp.ctx, sp.adapter, req, nil, log)
-			if !rr.OK {
-				if log != nil {
-					log.Errorf("单元 #%d 抢救请求失败: %s", k, rr.Error)
+				sem <- struct{}{}
+				rr := translateWithRetryLog(sp.ctx, sp.adapter, req, nil, log)
+				<-sem
+				if !rr.OK {
+					if log != nil {
+						log.Errorf("单元 #%d 抢救请求失败: %s", k, rr.Error)
+					}
+					return
 				}
-				continue
-			}
-			var joined strings.Builder
-			for _, l := range SplitLines(rr.Text) {
-				if strings.Trim(l, " \t\r\n") == "" {
-					continue
+				var joined strings.Builder
+				for _, l := range SplitLines(rr.Text) {
+					if strings.Trim(l, " \t\r\n") == "" {
+						continue
+					}
+					if joined.Len() > 0 {
+						joined.WriteByte(' ')
+					}
+					joined.WriteString(l)
 				}
-				if joined.Len() > 0 {
-					joined.WriteByte(' ')
+				if candidate, ok := validateLine(k, joined.String()); ok {
+					mu.Lock()
+					uniqTranslations[k] = candidate
+					uniqTranslated[k] = true
+					mu.Unlock()
+					if log != nil {
+						log.Infof("单元 #%d 抢救成功", k)
+					}
 				}
-				joined.WriteString(l)
-			}
-			if candidate, ok := validateLine(k, joined.String()); ok {
-				uniqTranslations[k] = candidate
-				uniqTranslated[k] = true
-				if log != nil {
-					log.Infof("单元 #%d 抢救成功", k)
-				}
-			}
+			}(k)
 		}
+		wg.Wait()
 	}
 	rescue(1)
 	rescue(2)

@@ -348,13 +348,18 @@ func spliceResult(sp spliceParams, vlines []lineInfo, uniqTranslations []string,
 	return Result{OK: true, Text: normalizeIfChinese(sp.target, strings.Trim(result, " \t\r\n"))}
 }
 
+// maxConcurrent bounds parallel model requests (group phase and rescue
+// alike). A simultaneous burst invites provider rate limits, which would
+// then need retries and stall the whole batch; 4 keeps 8 groups at 2 waves.
+const maxConcurrent = 4
+
 // runGroupWorkers fans the group requests out with bounded parallelism and
 // returns each group's (result, reply-lines).
 func runGroupWorkers(sp spliceParams, systemPrompt string, uniq []string, groups int, groupSize int) ([]Result, [][]string) {
 	groupResults := make([]Result, groups)
 	groupLines := make([][]string, groups)
 	var wg sync.WaitGroup
-	sem := make(chan struct{}, 3) // max 3 concurrent workers
+	sem := make(chan struct{}, maxConcurrent)
 	for gi := 0; gi < groups; gi++ {
 		wg.Add(1)
 		go func(gi int) {
