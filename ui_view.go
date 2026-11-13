@@ -162,10 +162,16 @@ func (a *app) quotaAlertView(c *ui.Context) {
 		return
 	}
 	if ui.Modal(c, &a.showQuotaAlert, func() {
-		ui.Column(c).Gap(10).Padding(16).Width(380).Children(func() {
-			ui.Text(c, "免费额度已用完").Bold()
-			ui.Text(c, a.status).FontSize(12)
-			ui.Text(c, "已停止调用模型翻译。免费额度通常按天重置；你也可以在设置中切换其他模型。").FontSize(12)
+		t := c.Theme()
+		ui.Column(c).Gap(10).Padding(20).Width(380).Children(func() {
+			ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
+				ui.Text(c, "⚠").FontSize(18).TextColor(t.Warning)
+				ui.Text(c, "免费额度已用完").Bold().FontSize(15)
+			})
+			ui.Column(c).Gap(6).Children(func() {
+				ui.Text(c, a.status).FontSize(12)
+				ui.Text(c, "已停止调用模型翻译。免费额度通常按天重置；也可以在设置中切换其他模型。").FontSize(12).TextColor(t.TextMuted)
+			})
 			ui.Row(c).Gap(8).Justify(ui.End).Children(func() {
 				if ui.PrimaryButton(c, "重试").Clicked() {
 					a.quotaExhausted = false
@@ -186,7 +192,7 @@ func (a *app) view(c *ui.Context) {
 	t := c.Theme()
 
 	// Root: padded column filling the window.
-	ui.Column(c).Fill().Padding(12).Gap(8).Children(func() {
+	ui.Column(c).Fill().Padding(16).Gap(10).Children(func() {
 		if a.tab == 1 {
 			a.logView(c)
 		} else {
@@ -203,7 +209,7 @@ func (a *app) mainContent(c *ui.Context, t *ui.Theme) {
 	// Debounce: schedule a frame for when auto-translate should fire, then
 	// start the translation on that frame. Arms on source edits; a new edit
 	// before the delay re-arms.
-	if ui.TextArea(c, &a.source).Placeholder("输入要翻译的文本…").Height(100).Changed() {
+	if ui.TextArea(c, &a.source).Placeholder("输入要翻译的文本…").Height(110).Changed() {
 		a.lastEditAt = time.Now()
 		a.editArmed = true
 		c.After(autoTranslateDelay)
@@ -215,31 +221,51 @@ func (a *app) mainContent(c *ui.Context, t *ui.Theme) {
 		}
 	}
 
-	// Status line.
-	statusText := a.status
-	if statusText != "" {
-		ui.Text(c, statusText).FontSize(11).TextColor(t.TextMuted)
-	} else {
-		ui.Text(c, "").FontSize(11)
-	}
-
-	// Result area (grows, streams, follows the bottom).
-	ui.Scroll(c).TrackScroll(&a.resultScroll).Grow(1).Children(func() {
-		ui.Text(c, a.output)
+	// Status line: spinner while translating, colored dot on finish/error.
+	ui.Row(c).Gap(6).AlignItems(ui.Center).Height(18).Children(func() {
+		if a.phase == 1 {
+			ui.Spinner(c).Label("翻译中")
+			ui.Text(c, "翻译中…").FontSize(11).TextColor(t.TextMuted)
+		} else {
+			statusText := a.status
+			if statusText == "" {
+				statusText = "输入后自动翻译"
+			}
+			switch {
+			case strings.HasPrefix(statusText, "完成"):
+				ui.Text(c, "●").FontSize(11).TextColor(t.Success)
+			case statusText == "已复制" || statusText == "输入后自动翻译":
+				ui.Text(c, "●").FontSize(11).TextColor(t.TextMuted)
+			default:
+				ui.Text(c, "●").FontSize(11).TextColor(t.Danger)
+			}
+			ui.Text(c, statusText).FontSize(11).TextColor(t.TextMuted)
+		}
+		ui.Text(c, "").Grow(1)
 	})
 
-	// Bottom bar: target language, settings, copy, quit. The language list
-	// leads with 中英互译 (auto direction by input language, stored as
-	// target index -1), followed by the fixed targets.
-	ui.Row(c).Gap(8).Children(func() {
+	// Result card (grows, streams, follows the bottom).
+	ui.Scroll(c).TrackScroll(&a.resultScroll).Grow(1).Children(func() {
+		ui.Column(c).Fill().Children(func() {
+			out := a.output
+			if out == "" && a.phase == 0 {
+				ui.Text(c, "译文会显示在这里").FontSize(13).TextColor(t.TextMuted)
+			} else {
+				ui.Text(c, out).FontSize(13)
+			}
+		})
+	})
+
+	// Bottom bar: target language + actions.
+	ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
 		langs := make([]string, 0, provider.TargetCount()+1)
 		langs = append(langs, autoTargetName)
 		for i := 0; i < provider.TargetCount(); i++ {
 			langs = append(langs, provider.TargetDisplayName(i))
 		}
 		choice := targetDisplayName(a.targetIdx)
-		ui.Text(c, "目标语言").FontSize(12)
-		sel := ui.Select(c, &choice, langs)
+		ui.Text(c, "目标语言").FontSize(12).TextColor(t.TextMuted)
+		sel := ui.Select(c, &choice, langs).Width(160)
 		if sel.Changed() {
 			a.targetIdx = targetIndexForName(choice)
 			a.saveTarget()
@@ -248,16 +274,16 @@ func (a *app) mainContent(c *ui.Context, t *ui.Theme) {
 				a.translateFromView()
 			}
 		}
+		ui.Text(c, "").Grow(1)
 		if ui.Button(c, "设置").Clicked() {
 			a.openSettings()
 		}
-		if ui.Button(c, "复制结果").Clicked() && a.output != "" {
-			c.WriteClipboard(a.output)
-			a.status = "已复制"
-			c.Invalidate()
-		}
-		if ui.Button(c, "退出").Clicked() {
-			mygo.App.Quit()
+		if a.output != "" {
+			if ui.PrimaryButton(c, "复制结果").Clicked() {
+				c.WriteClipboard(a.output)
+				a.status = "已复制"
+				c.Invalidate()
+			}
 		}
 	})
 }
@@ -287,19 +313,18 @@ func (a *app) settingsView(c *ui.Context) {
 		return
 	}
 	if ui.Modal(c, &a.showSettings, func() {
-		ui.Column(c).Gap(10).Padding(16).Width(420).Children(func() {
-			ui.Text(c, "设置").Bold()
+		ui.Column(c).Gap(14).Padding(20).Width(440).Children(func() {
+			ui.Text(c, "设置").Bold().FontSize(15)
 
-			// Model picker: switching files the edited key under the
-			// provider it was typed for, then swaps in the other provider's.
-			provs := make([]string, provider.ProviderCount())
-			for i := range provs {
-				provs[i] = provider.ProviderDisplayName(i)
-			}
-			pchoice := provider.ProviderDisplayName(a.panelActiveProv)
-			ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
-				ui.Text(c, "模型").Width(80)
-				psel := ui.Select(c, &pchoice, provs)
+			// Model section.
+			ui.Column(c).Gap(8).Children(func() {
+				ui.Text(c, "模型").FontSize(12).TextColor(c.Theme().TextMuted)
+				provs := make([]string, provider.ProviderCount())
+				for i := range provs {
+					provs[i] = provider.ProviderDisplayName(i)
+				}
+				pchoice := provider.ProviderDisplayName(a.panelActiveProv)
+				psel := ui.Select(c, &pchoice, provs).Fill()
 				if psel.Changed() {
 					for i, name := range provs {
 						if name == pchoice {
@@ -308,21 +333,20 @@ func (a *app) settingsView(c *ui.Context) {
 						}
 					}
 				}
-			})
 
-			// Per-provider key field: the value lives in panelKeys for the
-			// active provider.
-			ui.Row(c).Gap(8).AlignItems(ui.Center).Children(func() {
-				ui.Text(c, "API Key").Width(80)
+				// Per-provider key field: the value lives in panelKeys for
+				// the active provider.
 				key := a.panelKeys[a.panelActiveProv]
-				kf := ui.TextInput(c, &key).Password().Placeholder("在此填写当前模型的 API Key").Grow(1)
+				ui.TextInput(c, &key).Password().
+					Placeholder("API Key（当前模型）").Fill()
 				a.panelKeys[a.panelActiveProv] = key
-				_ = kf
 			})
 
-			ui.Text(c, "术语词典（每行一条：术语 = 翻译）").FontSize(11)
-			ui.TextArea(c, &a.glossaryText).Height(120)
-			_ = c.Theme()
+			// Glossary section.
+			ui.Column(c).Gap(8).Children(func() {
+				ui.Text(c, "术语词典（每行一条：术语 = 翻译）").FontSize(12).TextColor(c.Theme().TextMuted)
+				ui.TextArea(c, &a.glossaryText).Height(120)
+			})
 
 			ui.Row(c).Gap(8).Children(func() {
 				if ui.Button(c, "查看日志").Clicked() {
