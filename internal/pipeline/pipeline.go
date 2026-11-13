@@ -206,13 +206,22 @@ func Translate(ctx context.Context, opts Options, text string, adapter provider.
 	if !hasTech {
 		// MT style: one user-message request in the official template;
 		// the pipeline's must-keep-token rules follow. System prompt stays
-		// empty (the model is trained without one).
+		// empty (the model is trained without one). SHORT inputs drop the
+		// rules entirely: run evidence — the official bare template
+		// translates "apple" to "苹果", but with the appended rule text the
+		// same model degenerates into "appleapple"; on short text the
+		// rules are noise to an MT model.
+		const shortInputBytes = 60
 		var proseSystem, proseUser string
 		if mtStyle {
 			proseSystem = ""
-			proseUser = "把下面的文本翻译成" + targetName + "，不要额外解释。" +
-				"逐字保留数字、百分号、括号、文件路径、代码标识符、URL 和命令名，" +
-				"保持行结构完全一致，不要遗漏任何一行。" + glossaryBlock + "\n\n" + src
+			proseUser = "把下面的文本翻译成" + targetName + "，不要额外解释。"
+			if len(src) > shortInputBytes {
+				proseUser += "逐字保留数字、百分号、括号、文件路径、代码标识符、URL 和命令名，" +
+					"保持行结构完全一致，不要遗漏任何一行。" +
+					"英文双引号括起来的内容（JSON 字段、错误信息）必须原样保留，不要翻译其中任何内容。"
+			}
+			proseUser += glossaryBlock + "\n\n"
 		} else {
 			proseSystem = "You are a professional translator. Translate the user's text " +
 				"exactly into the requested target language, in natural, fluent " +
@@ -287,6 +296,36 @@ func Translate(ctx context.Context, opts Options, text string, adapter provider.
 				res = StripExplanations(res)
 			}
 			rr = Result{OK: true, Text: normalizeIfChinese(tIdx, res)}
+			// Quality gate (splice has it; prose needs it too): models
+			// degenerate on short inputs — run: Hunyuan-MT replied
+			// "appleapple" (stutter) for a single word. Retry once with the
+			// wordy instruction; if still bad, fail loudly instead of
+			// caching gibberish.
+			if IsBadTranslation(rr.Text) || strings.EqualFold(rr.Text, src) {
+				if opts.Log != nil {
+					opts.Log.Warnf("prose 译文未通过质量守卫（%q），重试一次", rr.Text)
+				}
+				retryReq := provider.Request{
+					APIKey:       key,
+					SystemPrompt: proseSystem,
+					UserPrompt:   proseUser + src,
+				}
+				rr2 := translateWithRetryLog(ctx, adapter, retryReq, nil, opts.Log)
+				if rr2.OK {
+					res2 := strings.Trim(rr2.Text, " \t\r\n")
+					if filter.StripExplanations {
+						res2 = StripExplanations(res2)
+					}
+					cand := normalizeIfChinese(tIdx, res2)
+					if !IsBadTranslation(cand) && !strings.EqualFold(cand, src) {
+						rr = Result{OK: true, Text: cand}
+					} else {
+						rr = Result{OK: false, Error: "翻译失败：模型输出异常（重复或未翻译），请重试"}
+					}
+				} else {
+					rr = rr2
+				}
+			}
 		}
 		return wrapResult(rr)
 	}

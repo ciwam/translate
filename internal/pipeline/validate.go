@@ -176,9 +176,12 @@ func IsBadTranslation(text string) bool {
 		}
 	}
 	// Stutter: the head of the line repeats consecutively (Qwen's degenerate
-	// loop produces "BuildingBuilding C...", "连接连接C连接CXX...").
+	// loop produces "BuildingBuilding C...", "连接连接C连接CXX..."; Hunyuan
+	// produces "Apple Apple" — case-insensitive so spaced variants catch
+	// too).
+	lower := strings.ToLower(s)
 	for l := 2; l*2 <= n && l < 64; l++ {
-		if s[:l] == s[l:l*2] {
+		if lower[:l] == lower[l:l*2] {
 			return true
 		}
 	}
