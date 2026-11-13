@@ -326,7 +326,7 @@ func (a *app) settingsView(c *ui.Context) {
 					provs[i] = provider.ProviderDisplayName(i)
 				}
 				pchoice := provider.ProviderDisplayName(a.panelActiveProv)
-				psel := ui.Select(c, &pchoice, provs).Fill()
+				psel := ui.Select(c, &pchoice, provs).FillWidth()
 				if psel.Changed() {
 					for i, name := range provs {
 						if name == pchoice {
@@ -340,7 +340,7 @@ func (a *app) settingsView(c *ui.Context) {
 				// the active provider.
 				key := a.panelKeys[a.panelActiveProv]
 				ui.TextInput(c, &key).Password().
-					Placeholder("API Key（当前模型）").Fill()
+					Placeholder("API Key（当前模型）").FillWidth()
 				a.panelKeys[a.panelActiveProv] = key
 			})
 
