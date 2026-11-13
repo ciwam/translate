@@ -13,7 +13,6 @@ usage() {
   dmg     清理缓存 + 测试 + 打包 Translate.app 与 DMG
   run     清理缓存 + 测试 + 打包并启动 Translate.app
   test    清理缓存 + 运行测试
-  dev     开发模式（热重载，Ctrl+C 退出，不清理缓存）
   clean   清理构建产物（build/ 与 .mygo/）与 Go 缓存
   help    显示本帮助
 EOF
@@ -30,9 +29,6 @@ cmd="${1:-help}"
 case "$cmd" in
     test)
         run_tests
-        ;;
-    dev)
-        $MYGO dev
         ;;
     clean)
         rm -rf build .mygo
