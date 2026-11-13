@@ -69,3 +69,8 @@ func (c *resultCache) put(key, val string) {
 
 // Process-lifetime cache shared across Translate calls (64 entries, as C++).
 var resultCacheDefault = newResultCache(64)
+
+// ClearCache drops every cached translation. Used when the app is
+// minimized: entries are reproducible (re-translate on demand), so they are
+// the first thing to give back when memory matters.
+func ClearCache() { resultCacheDefault = newResultCache(64) }

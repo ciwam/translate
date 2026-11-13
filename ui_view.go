@@ -388,9 +388,7 @@ func (a *app) confirmSettings() {
 }
 
 // autoTargetName is the 中英互译 entry in the target-language picker.
-const autoTargetName = "中英互译"
-
-// autoTargetIndex is the stored index for the auto entry (must match
+const autoTargetName = "中英互译"// autoTargetIndex is the stored index for the auto entry (must match
 // provider.AutoBidirectional).
 const autoTargetIndex = -1
 

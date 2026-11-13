@@ -41,6 +41,16 @@ func main() {
 			app.openSettings()
 			win.Invalidate()
 		}
+
+		// Memory hygiene: when the window is minimized, the UI state is idle
+		// and the caches are stale — drop what we can and hand the memory
+		// back to the OS (debug.FreeOSMemory runs a full GC and returns
+		// scavengeable spans). Restoring just redraws; no state rebuild is
+		// needed because nothing durable is dropped (the LRU result cache
+		// is reproducible by re-translation).
+		win.OnMinimize(func() {
+			app.releaseMemory()
+		})
 	})
 	if err := mygo.App.Run(); err != nil {
 		log.Fatal(err)
