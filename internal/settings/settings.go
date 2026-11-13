@@ -65,7 +65,9 @@ func (s *Store) Load() Data {
 		return d
 	}
 	_ = json.Unmarshal(b, &d)
-	if d.TargetIndex < 0 || d.TargetIndex >= provider.TargetCount() {
+	// -1 is the 中英互译 auto entry; anything else must be a real target.
+	if d.TargetIndex != int(provider.AutoBidirectional) &&
+		(d.TargetIndex < 0 || d.TargetIndex >= provider.TargetCount()) {
 		d.TargetIndex = provider.DefaultTargetIndex()
 	}
 	if d.ProviderIndex < 0 || d.ProviderIndex >= provider.ProviderCount() {

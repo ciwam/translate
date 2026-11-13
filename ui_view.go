@@ -193,22 +193,20 @@ func (a *app) mainContent(c *ui.Context, t *ui.Theme) {
 		ui.Text(c, a.output)
 	})
 
-	// Bottom bar: target language, settings, copy, quit.
+	// Bottom bar: target language, settings, copy, quit. The language list
+	// leads with 中英互译 (auto direction by input language, stored as
+	// target index -1), followed by the fixed targets.
 	ui.Row(c).Gap(8).Children(func() {
-		langs := make([]string, provider.TargetCount())
-		for i := range langs {
-			langs[i] = provider.TargetDisplayName(i)
+		langs := make([]string, 0, provider.TargetCount()+1)
+		langs = append(langs, autoTargetName)
+		for i := 0; i < provider.TargetCount(); i++ {
+			langs = append(langs, provider.TargetDisplayName(i))
 		}
-		choice := provider.TargetDisplayName(a.targetIdx)
+		choice := targetDisplayName(a.targetIdx)
 		ui.Text(c, "目标语言").FontSize(12)
 		sel := ui.Select(c, &choice, langs)
 		if sel.Changed() {
-			for i, name := range langs {
-				if name == choice {
-					a.targetIdx = i
-					break
-				}
-			}
+			a.targetIdx = targetIndexForName(choice)
 			a.saveTarget()
 			// Retranslate with the new language.
 			if a.phase == 0 && strings.TrimSpace(a.source) != "" {
@@ -321,4 +319,32 @@ func (a *app) confirmSettings() {
 	d.Glossary = a.glossaryText
 	_ = a.store.Save(d)
 	a.showSettings = false
+}
+
+// autoTargetName is the 中英互译 entry in the target-language picker.
+const autoTargetName = "中英互译"
+
+// autoTargetIndex is the stored index for the auto entry (must match
+// provider.AutoBidirectional).
+const autoTargetIndex = -1
+
+// targetDisplayName renders a stored target index for the picker.
+func targetDisplayName(idx int) string {
+	if idx == autoTargetIndex {
+		return autoTargetName
+	}
+	return provider.TargetDisplayName(idx)
+}
+
+// targetIndexForName maps a picker choice back to the stored index.
+func targetIndexForName(name string) int {
+	if name == autoTargetName {
+		return autoTargetIndex
+	}
+	for i := 0; i < provider.TargetCount(); i++ {
+		if provider.TargetDisplayName(i) == name {
+			return i
+		}
+	}
+	return autoTargetIndex
 }

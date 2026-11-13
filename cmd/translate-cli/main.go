@@ -117,6 +117,10 @@ func main() {
 		Log:      log,
 	}, req.Text, adapter, nil, &route)
 	elapsed := time.Since(start).Milliseconds()
+	respTarget := "auto"
+	if tgt >= 0 {
+		respTarget = targetCodes[tgt]
+	}
 
 	resp := response{
 		OK:        res.OK,
@@ -124,7 +128,7 @@ func main() {
 		Error:     res.Error,
 		Route:     route,
 		Provider:  providerNames[prov],
-		Target:    targetCodes[tgt],
+		Target:    respTarget,
 		ElapsedMS: elapsed,
 	}
 	out, _ := json.Marshal(resp)
@@ -164,8 +168,11 @@ func parseTarget(v any) (int, error) {
 		return 1, nil
 	case float64:
 		i := int(t)
+		if i == int(provider.AutoBidirectional) {
+			return i, nil
+		}
 		if i < 0 || i >= len(targetCodes) {
-			return 0, fmt.Errorf("target 越界（0..6）")
+			return 0, fmt.Errorf("target 越界（-1=中英互译, 0..6）")
 		}
 		return i, nil
 	case string:

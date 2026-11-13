@@ -25,6 +25,11 @@ const (
 	French
 	German
 	Spanish
+
+	// AutoBidirectional is the "中英互译" pseudo-target: the pipeline
+	// detects the input language per call — CJK input goes to English,
+	// everything else to Simplified Chinese — instead of a fixed target.
+	AutoBidirectional Target = -1
 )
 
 // Request is a fully-prepared model request. The pipeline owns prompt

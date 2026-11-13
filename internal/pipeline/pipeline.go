@@ -41,6 +41,9 @@ var providerNames = []string{"zhipu", "siliconflow", "hunyuan-mt"}
 
 // logTargetName is a safe display name for logging.
 func logTargetName(i int) string {
+	if i == int(provider.AutoBidirectional) {
+		return "auto(zh<->en)"
+	}
 	if i < 0 || i >= len(targetCodes) {
 		return "?"
 	}
@@ -121,6 +124,23 @@ func Translate(ctx context.Context, opts Options, text string, adapter provider.
 		pIdx = 0
 	}
 	tIdx := opts.Target
+	if tIdx == int(provider.AutoBidirectional) {
+		// 中英互译: CJK input -> English, anything else -> Simplified
+		// Chinese. Resolved per call so mixed-language sources switch
+		// direction automatically.
+		if HasCJK(src) {
+			tIdx = int(provider.English)
+			if opts.Log != nil {
+				opts.Log.Infof("中英互译：检出中文输入，目标英文")
+			}
+		} else {
+			tIdx = int(provider.Chinese)
+			if opts.Log != nil {
+				opts.Log.Infof("中英互译：检出非中文输入，目标简体中文")
+			}
+		}
+		setRoute("auto-bidirectional")
+	}
 	if tIdx < 0 || tIdx >= len(promptNames) {
 		tIdx = 0
 	}
