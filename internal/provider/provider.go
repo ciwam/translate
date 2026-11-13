@@ -99,7 +99,7 @@ func TargetCode(i int) string {
 	return targetNames[i].Code
 }
 
-func DefaultTargetIndex() int { return int(Chinese) }
+func DefaultTargetIndex() int { return int(AutoBidirectional) }
 
 var targetNames = []struct{ Code, Display string }{
 	{"en", "English"},
