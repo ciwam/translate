@@ -11,7 +11,6 @@ usage() {
 
 命令:
   dmg     清理缓存 + 测试 + 打包 Translate.app 与 DMG
-  app     清理缓存 + 测试 + 打包 Translate.app（跳过 DMG）
   run     清理缓存 + 测试 + 打包并启动 Translate.app
   test    清理缓存 + 运行测试
   dev     开发模式（热重载，Ctrl+C 退出，不清理缓存）
@@ -39,12 +38,6 @@ case "$cmd" in
         rm -rf build .mygo
         go clean -cache -testcache
         echo "已清理 build/、.mygo/ 与 Go 缓存"
-        ;;
-    app)
-        run_tests
-        echo "==> 打包 Translate.app"
-        $MYGO build
-        echo "产物: $APP"
         ;;
     dmg)
         run_tests
