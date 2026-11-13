@@ -142,17 +142,6 @@ func (a *app) view(c *ui.Context) {
 
 	// Root: padded column filling the window.
 	ui.Column(c).Fill().Padding(12).Gap(8).Children(func() {
-		// Tab bar: 翻译 / 日志.
-		ui.Row(c).Gap(4).Children(func() {
-			if ui.Button(c, "翻译").Clicked() {
-				a.tab = 0
-			}
-			if ui.Button(c, "日志").Clicked() {
-				a.tab = 1
-			}
-			ui.Text(c, "").Grow(1)
-		})
-
 		if a.tab == 1 {
 			a.logView(c)
 		} else {
@@ -289,7 +278,12 @@ func (a *app) settingsView(c *ui.Context) {
 			ui.TextArea(c, &a.glossaryText).Height(120)
 			_ = c.Theme()
 
-			ui.Row(c).Gap(8).Justify(ui.End).Children(func() {
+			ui.Row(c).Gap(8).Children(func() {
+				if ui.Button(c, "查看日志").Clicked() {
+					a.showSettings = false
+					a.tab = 1
+				}
+				ui.Text(c, "").Grow(1)
 				if ui.Button(c, "取消").Clicked() {
 					a.showSettings = false
 				}
