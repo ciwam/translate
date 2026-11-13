@@ -39,8 +39,10 @@ case "$cmd" in
         run_tests
         echo "==> 打包 Translate.app 与 DMG"
         $MYGO build
+        # DMG is the distributable; the loose .app is redundant — remove it.
+        rm -rf "$APP"
         echo "产物:"
-        ls -lh build/darwin-arm64/ | awk '{print "  " $NF " (" $5 ")"}' | tail -2
+        ls -lh build/darwin-arm64/ | awk '{print "  " $NF " (" $5 ")"}' | tail -1
         ;;
     run)
         run_tests
