@@ -42,7 +42,17 @@ func IsProtectedToken(tok string) bool {
 			'_', '/', '%', '\\', '[', ']', '=', '<', '>', '$',
 			'{', '}', '@', '#', '&', '+', '*', '~', '^', '|', '`':
 			technical = true
-		case '.', ',', ';', '(', ')', ':', '!', '?':
+		case '(', ')':
+			// Parentheses glued to a word's OUTER edge ("(maximum",
+			// "characters)") are sentence punctuation the model may
+			// translate around — masking them shred prose into fragments
+			// (run: "Name is too long (maximum is 40 characters)" masked
+			// "(maximum" as [[1]] and four valid translations were
+			// rejected). Only INTERNAL parens count ("foo(bar", "f(x)y").
+			if i > 0 && i+1 < n {
+				technical = true
+			}
+		case '.', ',', ';', ':', '!', '?':
 			if i+1 < n {
 				technical = true // internal: CSV/extension/call/URL
 			}

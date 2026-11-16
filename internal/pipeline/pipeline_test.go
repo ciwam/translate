@@ -480,3 +480,26 @@ func TestHasNoTranslatableContent(t *testing.T) {
 		t.Error("unmasked unit must not qualify")
 	}
 }
+
+// Run: "Name is too long (maximum is 40 characters)" — the leading paren
+// glued to "maximum" made "(maximum" a protected token, which got masked;
+// four valid translations were then rejected for "losing" it. Edge-glued
+// parens are sentence punctuation, not structural.
+func TestEdgeParenNotProtected(t *testing.T) {
+	if IsProtectedToken("(maximum") {
+		t.Error(`"(maximum" must be prose`)
+	}
+	if IsProtectedToken("characters)") {
+		t.Error(`"characters)" must be prose`)
+	}
+	// Internal parens stay structural.
+	if !IsProtectedToken("foo(bar") || !IsProtectedToken("f(x)y") {
+		t.Error("internal parens must stay protected")
+	}
+	// The bare number "40" stays protected (models corrupt numbers), so the
+	// sentence still routes to splice — but with a single small unit instead
+	// of a shredded "(maximum" fragment, it translates cleanly.
+	if !AnalyzeTechnical("Name is too long (maximum is 40 characters)") {
+		t.Error("number must still protect (route to splice)")
+	}
+}
