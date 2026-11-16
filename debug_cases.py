@@ -240,6 +240,9 @@ def main():
         json.dump({"provider": args.provider, "cases": results},
                   ensure_ascii=False, indent=2, fp=f)
     print("\n# %d/%d 通过 | 结果已保存: %s" % (len(results) - failed, len(results), out))
+    if failed:
+        print("# %d 个用例失败" % failed, file=sys.stderr)
+        return 1
     return 0
 
 
