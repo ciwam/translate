@@ -255,6 +255,14 @@ func translateSplice(sp spliceParams) Result {
 			}
 			return "", false
 		}
+		// MT models love wrapping command lines in markdown fences or
+		// backticks (runs: "``` npm install && npm run dev ```",
+		// "`npm install && npm run dev`"); the wrapping is noise, not
+		// translation.
+		replyLine = stripCodeFences(replyLine)
+		if len(replyLine) >= 2 && strings.HasPrefix(replyLine, "`") && strings.HasSuffix(replyLine, "`") {
+			replyLine = strings.TrimSpace(replyLine[1 : len(replyLine)-1])
+		}
 		orig := uniqOrig[k]
 		rt := strings.Trim(replyLine, " \t\r\n")
 		if rt == "" || rt == strings.Trim(orig, " \t\r\n") {
@@ -274,6 +282,15 @@ func translateSplice(sp spliceParams) Result {
 			// verbatim, so the echo IS the correct translation. (Run: the
 			// model echoed this line every time and the run failed.)
 			if !alreadyTarget && isTechValueLine(orig) {
+				alreadyTarget = true
+			}
+			// A technical line (has protected tokens) whose prose words are
+			// all lowercase command/label speak ("npm install && npm run
+			// dev", `request: "GET /v2/health HTTP/1.1",`) carries nothing a
+			// CJK translation can improve — the model echoing it is the
+			// right answer. (Runs: both lines were echoed and the runs
+			// failed at 3/4 and 1/3.)
+			if !alreadyTarget && isCommandLikeLine(orig) {
 				alreadyTarget = true
 			}
 			if !alreadyTarget && sp.target == 0 { // English target
@@ -596,6 +613,29 @@ var glueWords = map[string]bool{
 	"by": true, "from": true, "is": true, "are": true, "be": true,
 }
 
+// stripCodeFences removes markdown code-fence markers (``` and ```lang)
+// that MT models wrap around command lines. A fence only counts when the
+// trimmed line starts and ends with it — inline backticks stay untouched.
+func stripCodeFences(s string) string {
+	t := strings.TrimSpace(s)
+	if !strings.HasPrefix(t, "```") {
+		return s
+	}
+	// Drop the opening fence (and optional language tag on the same line),
+	// then a matching closing fence at the end.
+	body := t[3:]
+	if idx := strings.IndexByte(body, '\n'); idx >= 0 {
+		// Multi-line fenced block: "```lang\n...\n```" — keep the inside.
+		body = body[idx+1:]
+		body = strings.TrimSuffix(strings.TrimSpace(body), "```")
+		return strings.TrimSpace(body)
+	}
+	// Single line: "``` npm install && npm run dev ```"
+	body = strings.TrimSpace(body)
+	body = strings.TrimSuffix(body, "```")
+	return strings.TrimSpace(body)
+}
+
 // hasNoTranslatableContent reports whether the masked fragment holds only
 // glue words, placeholders, and short ASCII words that are pieces of the
 // masked technical tokens or command syntax ("and [[1]] go test [[2]]" —
@@ -610,6 +650,23 @@ func hasNoTranslatableContent(s string) bool {
 	}
 	if len(masked) > 80 {
 		return false // long fragment: a real translation is expected
+	}
+	// Symbol-only tokens ("|", "&&") carry nothing translatable: a model
+	// that respells them with Chinese enumeration marks ("debug、info 或
+	// warn" for "debug | info | warn") still produced a correct
+	// translation. Also exempt the prose words around them when they are
+	// short ASCII — enum lists read like "npm install && npm run dev".
+	symbolOnly := true
+	for _, tok := range toks {
+		if strings.ContainsFunc(tok, func(r rune) bool {
+			return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')
+		}) {
+			symbolOnly = false
+			break
+		}
+	}
+	if symbolOnly {
+		return true
 	}
 	for _, w := range strings.Fields(masked) {
 		if strings.HasPrefix(w, "[[") && strings.HasSuffix(w, "]]") {
@@ -685,12 +742,43 @@ func isLetterless(s string) bool {
 	return true
 }
 
-// isTechValueLine reports whether s is a short "key: value" line whose value
-// side is a single non-CJK word — a YAML/config field entry like
+// isTechValueLine reports whether s is a short "key: value" line whose value// side is a single non-CJK word — a YAML/config field entry like
 // "name: mygo-maintenance", "version: 1.2.3" or "id: user_42". The label may
 // be translated or not; the value is an identifier/number that must stay
 // verbatim, so the model echoing the line is the correct translation. Long
 // lines and multi-word values (real prose may follow) do NOT qualify.
+// isCommandLikeLine reports whether s reads as a command/config line rather
+// than prose: every word is either a protected token ("GET /v2/health
+// HTTP/1.1"), a short lowercase ASCII command word ("npm", "install",
+// "run"), or a field label ("request:"). A CJK translation of such a line
+// has nothing to add, so the model echoing it is the correct translation.
+// Prose sentences use longer or mixed-case words and keep the normal echo
+// rejection.
+func isCommandLikeLine(s string) bool {
+	t := strings.TrimSpace(s)
+	if t == "" || len(t) > 200 {
+		return false
+	}
+	words := 0
+	for _, w := range strings.Fields(t) {
+		words++
+		if IsProtectedToken(w) {
+			continue
+		}
+		word := strings.ToLower(strings.Trim(w, ".,;:!?()[]'\"`{}&|="))
+		if word == "" {
+			continue
+		}
+		// Labels ("request:", "error:") and short lowercase ASCII words
+		// (command verbs: get, install, run) are command speak.
+		if strings.HasSuffix(w, ":") || (len(word) <= 8 && word == strings.ToLower(word) && isASCIILettersOrDots(word)) {
+			continue
+		}
+		return false
+	}
+	return words >= 2
+}
+
 func isTechValueLine(s string) bool {
 	t := strings.Trim(s, " \t\r\n")
 	if len(t) > 80 {

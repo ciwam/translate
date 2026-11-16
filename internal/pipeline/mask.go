@@ -39,17 +39,26 @@ func IsProtectedToken(tok string) bool {
 		}
 		switch c {
 		case '0', '1', '2', '3', '4', '5', '6', '7', '8', '9',
-			'_', '/', '%', '\\', '[', ']', '=', '<', '>', '$',
+			'_', '/', '\\', '[', ']', '=', '<', '>', '$',
 			'{', '}', '@', '#', '&', '+', '*', '~', '^', '|', '`':
 			technical = true
+		case '%':
+			// "%" only marks a technical token when attached to a number
+			// ("50%", "99.4%"); in "reduction)." the percent sign belongs
+			// to prose and the word may translate.
+			if i > 0 && tok[i-1] >= '0' && tok[i-1] <= '9' {
+				technical = true
+			}
 		case '(', ')':
 			// Parentheses glued to a word's OUTER edge ("(maximum",
-			// "characters)") are sentence punctuation the model may
-			// translate around — masking them shred prose into fragments
-			// (run: "Name is too long (maximum is 40 characters)" masked
-			// "(maximum" as [[1]] and four valid translations were
-			// rejected). Only INTERNAL parens count ("foo(bar", "f(x)y").
-			if i > 0 && i+1 < n {
+			// "characters)", "reduction).") are sentence punctuation the
+			// model may translate around — masking them shred prose into
+			// fragments (run: "Name is too long (maximum is 40 characters)"
+			// masked "(maximum" as [[1]] and four valid translations were
+			// rejected). Only INTERNAL parens count ("foo(bar", "f(x)y");
+			// a paren followed only by sentence punctuation (").") is an
+			// edge, not internal.
+			if i > 0 && i+1 < n && !isSentencePunct(tok[i+1]) {
 				technical = true
 			}
 		case '.', ',', ';', ':', '!', '?':
@@ -68,7 +77,27 @@ func IsProtectedToken(tok string) bool {
 	// NOTE: word+colon labels ("ERROR:", "client:") are deliberately PROSE.
 	// Protecting them froze whole log lines when the model translated the
 	// label (run r3); placeholders now guard the truly structural tokens.
-	return technical && ascii*2 > n
+	// Symbol-only tokens ("|", "&&", "=") are punctuation-class: enum/
+	// chain separators the model legitimately respells with Chinese marks
+	// ("debug、info 或 warn"), so masking them only creates guaranteed
+	// rejections (run: "debug | info | warn" → pipes lost → 4x rejected).
+	// Require at least one letter or digit: no alnum → prose.
+	alnum := 0
+	for i := 0; i < n; i++ {
+		c := tok[i]
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') {
+			alnum++
+		}
+	}
+	return technical && ascii*2 > n && alnum > 0
+}
+
+// isSentencePunct reports whether c is sentence punctuation (possibly
+// followed by a closing quote/brace) — the tail of a token like
+// "reduction)." is a sentence ending, not a call.
+func isSentencePunct(c byte) bool {
+	return c == '.' || c == ',' || c == '!' || c == '?' || c == ';' ||
+		c == ':' || c == ')' || c == ']' || c == '"' || c == '\''
 }
 
 // AnalyzeTechnical classifies the whole source: true when any token is

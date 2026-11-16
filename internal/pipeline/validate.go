@@ -110,6 +110,9 @@ func protectedTokensPreservedMode(src, out string, looseCase bool) bool {
 	cmpOut := out
 	if looseCase {
 		cmpOut = strings.ToLower(out)
+		// Thousand separators: models render 257628 as "257,628"; compare
+		// against a comma-stripped copy so "257628" still matches.
+		cmpOut = stripDigitCommas(cmpOut)
 	}
 	i, n := 0, len(src)
 	for i < n {
@@ -149,10 +152,54 @@ func protectedTokensPreservedMode(src, out string, looseCase bool) bool {
 			if matched {
 				continue
 			}
+			// Number-anchor fallback: a token whose content is dominated by
+			// a number ("(99.4% reduction).") is preserved when that number
+			// survives — the model legitimately translates the surrounding
+			// prose word ("reduction" -> "减少").
+			if anchor := numericAnchor(needle); anchor != "" && strings.Contains(cmpOut, anchor) {
+				continue
+			}
 		}
 		return false
 	}
 	return true
+}
+
+// stripDigitCommas removes commas between digits ("257,628" -> "257628"),
+// leaving punctuation attached to words untouched.
+func stripDigitCommas(s string) string {
+	if !strings.Contains(s, ",") {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c == ',' && i > 0 && i+1 < len(s) && s[i-1] >= '0' && s[i-1] <= '9' && s[i+1] >= '0' && s[i+1] <= '9' {
+			continue
+		}
+		b.WriteByte(c)
+	}
+	return b.String()
+}
+
+// numericAnchor returns the longest digit run in s ("" when none).
+func numericAnchor(s string) string {
+	best, cur := "", ""
+	for i := 0; i < len(s); i++ {
+		if s[i] >= '0' && s[i] <= '9' {
+			cur += string(s[i])
+			if len(cur) > len(best) {
+				best = cur
+			}
+		} else {
+			cur = ""
+		}
+	}
+	if len(best) >= 2 {
+		return best
+	}
+	return ""
 }
 
 // IsBadTranslation flags a translated prose line that the weak model
